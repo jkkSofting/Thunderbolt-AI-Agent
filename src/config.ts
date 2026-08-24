@@ -21,6 +21,9 @@ export interface ThunderstormConfig {
 		branchPrefix: string;
 		autoCreatePullRequest: boolean;
 	};
+	verification: {
+		maxAutoRetries: number;
+	};
 }
 
 export function getConfig(): ThunderstormConfig {
@@ -49,6 +52,9 @@ export function getConfig(): ThunderstormConfig {
 			baseBranch: cfg.get<string>('git.baseBranch', 'main'),
 			branchPrefix: cfg.get<string>('git.branchPrefix', 'thunderstorm/'),
 			autoCreatePullRequest: cfg.get<boolean>('git.autoCreatePullRequest', true),
+		},
+		verification: {
+			maxAutoRetries: cfg.get<number>('verification.maxAutoRetries', 2),
 		},
 	};
 }

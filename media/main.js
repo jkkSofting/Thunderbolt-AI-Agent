@@ -11,6 +11,7 @@
 		completed: 'Abgeschlossen',
 		skipped: 'Übersprungen',
 		error: 'Fehler',
+		aborted: 'Abgebrochen',
 	};
 
 	const STATUS_GLYPHS = {
@@ -21,18 +22,38 @@
 		completed: '✓',
 		skipped: '–',
 		error: '✕',
+		aborted: '⏹',
 	};
 
-	const DEFAULT_EXPANDED_STATUSES = new Set(['active', 'waitingInput', 'waitingApproval', 'error']);
+	const DEFAULT_EXPANDED_STATUSES = new Set(['active', 'waitingInput', 'waitingApproval', 'error', 'aborted']);
 
-	let state = { phase: 'idle', ticketText: '', steps: {}, fileChanges: [], busy: false };
+	let state = {
+		phase: 'idle',
+		ticketText: '',
+		steps: {},
+		fileChanges: [],
+		busy: false,
+		abortRequested: false,
+		autoMode: false,
+		debugMode: false,
+	};
 	const userExpanded = new Set();
 	const userCollapsed = new Set();
 
+	let historyEntries = [];
+	let viewMode = 'pipeline';
+	const expandedHistoryEntries = new Set();
+
 	window.addEventListener('message', (event) => {
 		const message = event.data;
-		if (message && message.type === 'state') {
+		if (!message) {
+			return;
+		}
+		if (message.type === 'state') {
 			state = message.state;
+			render();
+		} else if (message.type === 'history') {
+			historyEntries = message.entries || [];
 			render();
 		}
 	});
@@ -83,16 +104,127 @@
 	function render() {
 		const app = document.getElementById('app');
 		app.innerHTML = '';
-		if (!state || state.phase === 'idle') {
+		app.appendChild(renderTopBar());
+		if (viewMode === 'history') {
+			app.appendChild(renderHistoryView());
+		} else if (!state || state.phase === 'idle') {
 			app.appendChild(renderStartForm());
 		} else {
 			app.appendChild(renderPipeline());
 		}
 	}
 
+	function renderTopBar() {
+		const bar = el('div', { class: 'global-top-bar' });
+
+		const titleRow = el('div', { class: 'global-title-row' });
+		titleRow.appendChild(el('h1', {}, 'Thunderstorm'));
+
+		const debugCheckbox = el('input', { type: 'checkbox' });
+		debugCheckbox.checked = !!(state && state.debugMode);
+		debugCheckbox.addEventListener('change', () => {
+			vscode.postMessage({ type: 'setDebugMode', enabled: debugCheckbox.checked });
+		});
+		const debugLabel = el('label', { class: 'checkbox-label debug-toggle' }, debugCheckbox, ' Debug-Modus');
+		titleRow.appendChild(debugLabel);
+
+		const outputBtn = el('button', { class: 'link' }, 'Debug-Ausgabe');
+		outputBtn.addEventListener('click', () => vscode.postMessage({ type: 'showDebugOutput' }));
+		titleRow.appendChild(outputBtn);
+
+		bar.appendChild(titleRow);
+
+		const tabs = el('div', { class: 'view-tabs' });
+		const pipelineTab = el('button', { class: viewMode === 'pipeline' ? 'tab-btn active' : 'tab-btn' }, 'Pipeline');
+		pipelineTab.addEventListener('click', () => {
+			viewMode = 'pipeline';
+			render();
+		});
+		const historyLabel = `Verlauf${historyEntries.length ? ` (${historyEntries.length})` : ''}`;
+		const historyTab = el('button', { class: viewMode === 'history' ? 'tab-btn active' : 'tab-btn' }, historyLabel);
+		historyTab.addEventListener('click', () => {
+			viewMode = 'history';
+			render();
+		});
+		tabs.appendChild(pipelineTab);
+		tabs.appendChild(historyTab);
+		bar.appendChild(tabs);
+
+		return bar;
+	}
+
+	function renderHistoryView() {
+		const container = el('div');
+		if (historyEntries.length === 0) {
+			container.appendChild(
+				el('p', {}, 'Noch keine Einträge. Der Verlauf füllt sich, sobald die Pipeline eine KI-Anfrage stellt.')
+			);
+			return container;
+		}
+		const list = el('div', { class: 'history-list' });
+		const newestFirst = historyEntries.slice().reverse();
+		for (const entry of newestFirst) {
+			list.appendChild(renderHistoryEntry(entry));
+		}
+		container.appendChild(list);
+		return container;
+	}
+
+	function renderHistoryEntry(entry) {
+		const card = el('div', { class: 'history-entry' });
+
+		const header = el('div', { class: 'history-entry-header' });
+		header.appendChild(el('span', { class: 'history-entry-title' }, entry.title));
+		header.appendChild(el('span', { class: 'history-entry-time' }, new Date(entry.timestamp).toLocaleTimeString()));
+		card.appendChild(header);
+
+		card.appendChild(el('div', { class: 'history-field-label' }, 'Eingabe'));
+		card.appendChild(el('div', { class: 'history-field-value' }, entry.userInput));
+
+		card.appendChild(el('div', { class: 'history-field-label' }, 'Ergebnis'));
+		card.appendChild(el('div', { class: 'history-field-value' }, entry.result));
+
+		if (entry.debug) {
+			const expanded = expandedHistoryEntries.has(entry.id);
+			const toggleBtn = el('button', { class: 'link' }, expanded ? 'Debug-Details ausblenden' : 'Debug-Details anzeigen');
+			toggleBtn.addEventListener('click', () => {
+				if (expanded) {
+					expandedHistoryEntries.delete(entry.id);
+				} else {
+					expandedHistoryEntries.add(entry.id);
+				}
+				render();
+			});
+			card.appendChild(toggleBtn);
+
+			if (expanded) {
+				const box = el('div', { class: 'history-debug-box' });
+				box.appendChild(
+					el(
+						'div',
+						{ class: 'history-field-label' },
+						`Modell: ${entry.debug.model.vendor}/${entry.debug.model.family} (${entry.debug.model.name})`
+					)
+				);
+				box.appendChild(el('div', { class: 'history-field-label' }, 'Prompt'));
+				box.appendChild(el('pre', { class: 'history-pre' }, entry.debug.prompt));
+				for (const call of entry.debug.toolCalls || []) {
+					box.appendChild(
+						el('div', { class: 'history-field-label' }, `Tool-Aufruf: ${call.name}(${JSON.stringify(call.input)})`)
+					);
+					box.appendChild(el('pre', { class: 'history-pre' }, call.result));
+				}
+				box.appendChild(el('div', { class: 'history-field-label' }, 'Rohantwort'));
+				box.appendChild(el('pre', { class: 'history-pre' }, entry.debug.rawResponse));
+				card.appendChild(box);
+			}
+		}
+
+		return card;
+	}
+
 	function renderStartForm() {
 		const container = el('div');
-		container.appendChild(el('h1', {}, 'Thunderstorm'));
 		container.appendChild(
 			el(
 				'p',
@@ -105,6 +237,15 @@
 			id: 'ticket-input',
 			placeholder: 'z. B. "Füge einen Umschalter für den Dark Mode auf der Einstellungsseite hinzu ..."',
 		});
+
+		const autoModeCheckbox = el('input', { type: 'checkbox', id: 'auto-mode-checkbox' });
+		const autoModeLabel = el(
+			'label',
+			{ class: 'checkbox-label' },
+			autoModeCheckbox,
+			' Auto-Modus: Implementierung und Verifizierung automatisch durchlaufen, ohne nach jedem Schritt nachzufragen'
+		);
+
 		const startBtn = el('button', {}, 'Pipeline starten');
 		startBtn.disabled = !!state.busy;
 		startBtn.addEventListener('click', () => {
@@ -112,9 +253,10 @@
 			if (!text) {
 				return;
 			}
-			vscode.postMessage({ type: 'start', text });
+			vscode.postMessage({ type: 'start', text, autoMode: autoModeCheckbox.checked });
 		});
 		container.appendChild(textarea);
+		container.appendChild(el('div', { class: 'actions' }, autoModeLabel));
 		container.appendChild(el('div', { class: 'actions' }, startBtn));
 		return container;
 	}
@@ -123,13 +265,26 @@
 		const container = el('div');
 
 		const topBar = el('div', { class: 'top-bar' });
-		topBar.appendChild(el('h1', {}, 'Thunderstorm'));
 		const resetBtn = el('button', { class: 'secondary' }, 'Zurücksetzen');
 		resetBtn.addEventListener('click', () => vscode.postMessage({ type: 'reset' }));
 		topBar.appendChild(resetBtn);
 		container.appendChild(topBar);
 
 		container.appendChild(el('div', { class: 'ticket-preview' }, state.ticketText));
+
+		if (state.autoMode && state.phase === 'running') {
+			container.appendChild(
+				el(
+					'div',
+					{ class: 'auto-mode-badge' },
+					'Auto-Modus aktiv: Implementierung und Verifizierung laufen ohne Rückfrage durch.'
+				)
+			);
+		}
+
+		if (state.phase === 'running') {
+			container.appendChild(renderAbortControls());
+		}
 
 		const stepper = el('ul', { class: 'stepper' });
 		for (const id of STEP_ORDER) {
@@ -146,7 +301,33 @@
 			);
 		}
 
+		if (state.phase === 'aborted') {
+			container.appendChild(
+				el('div', { class: 'aborted-banner' }, 'Vorgang abgebrochen. Sie können jederzeit einen neuen Vorgang starten.')
+			);
+		}
+
 		return container;
+	}
+
+	function renderAbortControls() {
+		const wrap = el('div', { class: 'abort-bar' });
+		if (state.abortRequested) {
+			wrap.appendChild(
+				el('span', { class: 'abort-note' }, 'Abbruch nach aktuellem Schritt vorgemerkt – der nächste Schritt startet nicht mehr.')
+			);
+			const undoBtn = el('button', { class: 'secondary' }, 'Abbruch zurücknehmen');
+			undoBtn.addEventListener('click', () => vscode.postMessage({ type: 'cancelAbortRequest' }));
+			wrap.appendChild(undoBtn);
+		} else {
+			const afterStepBtn = el('button', { class: 'secondary' }, 'Nach aktuellem Schritt abbrechen');
+			afterStepBtn.addEventListener('click', () => vscode.postMessage({ type: 'requestAbortAfterCurrentStep' }));
+			const nowBtn = el('button', { class: 'danger' }, 'Sofort abbrechen');
+			nowBtn.addEventListener('click', () => vscode.postMessage({ type: 'abortNow' }));
+			wrap.appendChild(afterStepBtn);
+			wrap.appendChild(nowBtn);
+		}
+		return wrap;
 	}
 
 	function renderStep(step) {

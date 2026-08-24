@@ -15,7 +15,10 @@ export function activate(context: vscode.ExtensionContext): void {
 		}),
 		vscode.commands.registerCommand('thunderstorm.reset', () => controller.reset()),
 		vscode.commands.registerCommand('thunderstorm.showDiff', () => controller.showDiff()),
-		vscode.commands.registerCommand('thunderstorm.listModels', () => listModels())
+		vscode.commands.registerCommand('thunderstorm.listModels', () => listModels()),
+		vscode.commands.registerCommand('thunderstorm.abortNow', () => controller.abortNow()),
+		vscode.commands.registerCommand('thunderstorm.abortAfterCurrentStep', () => controller.requestAbortAfterCurrentStep()),
+		vscode.commands.registerCommand('thunderstorm.showDebugOutput', () => controller.showDebugOutput())
 	);
 }
 

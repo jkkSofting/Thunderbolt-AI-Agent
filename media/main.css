@@ -87,6 +87,15 @@ button.link:hover {
 	text-decoration: underline;
 }
 
+button.danger {
+	background-color: var(--vscode-errorForeground);
+	color: var(--vscode-editor-background);
+}
+
+button.danger:hover {
+	opacity: 0.85;
+}
+
 .actions {
 	display: flex;
 	flex-wrap: wrap;
@@ -103,9 +112,122 @@ button.link:hover {
 
 .top-bar {
 	display: flex;
-	justify-content: space-between;
+	justify-content: flex-end;
 	align-items: center;
 	margin-bottom: 12px;
+}
+
+.global-top-bar {
+	margin-bottom: 12px;
+	padding-bottom: 10px;
+	border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.global-title-row {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	margin-bottom: 8px;
+}
+
+.global-title-row h1 {
+	margin: 0;
+	flex: 1;
+}
+
+.debug-toggle {
+	font-size: 0.85em;
+	opacity: 0.9;
+}
+
+.view-tabs {
+	display: flex;
+	gap: 4px;
+}
+
+.tab-btn {
+	background: none;
+	color: var(--vscode-foreground);
+	opacity: 0.7;
+	padding: 4px 10px;
+	border-bottom: 2px solid transparent;
+	border-radius: 0;
+}
+
+.tab-btn:hover {
+	background: none;
+	opacity: 1;
+}
+
+.tab-btn.active {
+	opacity: 1;
+	border-bottom-color: var(--vscode-focusBorder);
+	font-weight: 600;
+}
+
+.history-list {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.history-entry {
+	background-color: var(--vscode-textCodeBlock-background);
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 3px;
+	padding: 8px 10px;
+}
+
+.history-entry-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: baseline;
+	gap: 8px;
+	margin-bottom: 6px;
+}
+
+.history-entry-title {
+	font-weight: 600;
+	font-size: 0.94em;
+}
+
+.history-entry-time {
+	font-size: 0.8em;
+	opacity: 0.7;
+	white-space: nowrap;
+}
+
+.history-field-label {
+	font-size: 0.78em;
+	opacity: 0.7;
+	margin-top: 6px;
+	text-transform: uppercase;
+	letter-spacing: 0.02em;
+}
+
+.history-field-value {
+	white-space: pre-wrap;
+	font-size: 0.9em;
+}
+
+.history-debug-box {
+	margin-top: 8px;
+	padding-top: 8px;
+	border-top: 1px dashed var(--vscode-panel-border);
+}
+
+.history-pre {
+	white-space: pre-wrap;
+	word-break: break-word;
+	background-color: var(--vscode-editor-background);
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 3px;
+	padding: 6px 8px;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 0.85em;
+	max-height: 260px;
+	overflow-y: auto;
+	margin: 4px 0 0 0;
 }
 
 .ticket-preview {
@@ -117,6 +239,43 @@ button.link:hover {
 	max-height: 120px;
 	overflow-y: auto;
 	font-size: 0.92em;
+}
+
+.checkbox-label {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 0.92em;
+	cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"] {
+	flex-shrink: 0;
+}
+
+.auto-mode-badge {
+	background-color: var(--vscode-textCodeBlock-background);
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 3px;
+	padding: 6px 8px;
+	font-size: 0.85em;
+	margin-bottom: 10px;
+}
+
+.abort-bar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 6px;
+	margin-bottom: 12px;
+	padding-bottom: 10px;
+	border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.abort-note {
+	font-size: 0.85em;
+	opacity: 0.85;
+	flex-basis: 100%;
 }
 
 .stepper {
@@ -185,6 +344,12 @@ button.link:hover {
 	color: var(--vscode-errorForeground);
 }
 
+.step[data-status="aborted"] .step-marker {
+	border-color: var(--vscode-descriptionForeground);
+	color: var(--vscode-descriptionForeground);
+	opacity: 0.8;
+}
+
 .step-title {
 	font-weight: 600;
 	flex: 1;
@@ -246,6 +411,15 @@ button.link:hover {
 .done-banner {
 	background-color: var(--vscode-editorWidget-background, var(--vscode-textCodeBlock-background));
 	border: 1px solid var(--vscode-panel-border);
+	border-radius: 3px;
+	padding: 10px;
+	margin-top: 10px;
+	text-align: center;
+}
+
+.aborted-banner {
+	background-color: var(--vscode-inputValidation-warningBackground, var(--vscode-editorWidget-background));
+	border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border));
 	border-radius: 3px;
 	padding: 10px;
 	margin-top: 10px;

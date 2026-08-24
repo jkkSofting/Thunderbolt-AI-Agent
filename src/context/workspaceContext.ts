@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 const MAX_OPEN_FILES = 6;
 const MAX_CHARS_PER_FILE = 4000;
 const MAX_TREE_ENTRIES = 200;
-const EXCLUDE_GLOB = '**/{node_modules,dist,out,.git,.vscode-test,coverage}/**';
+export const WORKSPACE_EXCLUDE_GLOB = '**/{node_modules,dist,out,.git,.vscode-test,coverage}/**';
 
 export async function gatherWorkspaceContext(): Promise<string> {
 	const parts: string[] = [];
@@ -14,7 +14,7 @@ export async function gatherWorkspaceContext(): Promise<string> {
 	}
 	parts.push(`Workspace-Ordner: ${folders.map((f) => f.name).join(', ')}`);
 
-	const files = await vscode.workspace.findFiles('**/*', EXCLUDE_GLOB, MAX_TREE_ENTRIES);
+	const files = await vscode.workspace.findFiles('**/*', WORKSPACE_EXCLUDE_GLOB, MAX_TREE_ENTRIES);
 	const relPaths = files
 		.map((uri) => vscode.workspace.asRelativePath(uri, folders.length > 1))
 		.sort();

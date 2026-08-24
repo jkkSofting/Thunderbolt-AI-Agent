@@ -5,6 +5,8 @@ import { PipelineController } from '../pipeline/pipelineController';
 interface InboundMessage {
 	type: string;
 	text?: string;
+	autoMode?: boolean;
+	enabled?: boolean;
 }
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
@@ -15,6 +17,9 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 	constructor(private readonly extensionUri: vscode.Uri, private readonly controller: PipelineController) {
 		this.controller.onDidChangeState((state) => {
 			this.view?.webview.postMessage({ type: 'state', state });
+		});
+		this.controller.onDidChangeHistory((entries) => {
+			this.view?.webview.postMessage({ type: 'history', entries });
 		});
 	}
 
@@ -39,9 +44,10 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 		switch (message.type) {
 			case 'ready':
 				this.view?.webview.postMessage({ type: 'state', state: this.controller.getState() });
+				this.view?.webview.postMessage({ type: 'history', entries: this.controller.getHistory() });
 				return;
 			case 'start':
-				await this.controller.start(message.text ?? '');
+				await this.controller.start(message.text ?? '', !!message.autoMode);
 				return;
 			case 'provideInfo':
 				await this.controller.submitAdditionalInfo(message.text ?? '');
@@ -72,6 +78,21 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 				return;
 			case 'retry':
 				await this.controller.retry();
+				return;
+			case 'abortNow':
+				this.controller.abortNow();
+				return;
+			case 'requestAbortAfterCurrentStep':
+				this.controller.requestAbortAfterCurrentStep();
+				return;
+			case 'cancelAbortRequest':
+				this.controller.cancelAbortRequest();
+				return;
+			case 'setDebugMode':
+				this.controller.setDebugMode(!!message.enabled);
+				return;
+			case 'showDebugOutput':
+				this.controller.showDebugOutput();
 				return;
 			case 'openPr':
 				if (message.text) {

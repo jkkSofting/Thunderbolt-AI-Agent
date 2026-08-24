@@ -1,14 +1,18 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { getConfig } from '../config';
-import { sendPrompt } from '../llm/lmClient';
+import { sendPrompt, sendPromptWithTools } from '../llm/lmClient';
+import { createWorkspaceTools } from '../llm/workspaceTools';
 import { renderTemplate } from '../utils/template';
 import { extractJson } from '../utils/json';
+import { resolveWorkspacePath } from '../utils/paths';
 import { gatherWorkspaceContext } from '../context/workspaceContext';
 import { GitService } from '../git/gitService';
 import { OriginalContentProvider, THUNDERSTORM_ORIGINAL_SCHEME } from '../diff/originalContentProvider';
 import {
+	DebugInfo,
 	FileChange,
+	HistoryEntry,
 	ImplementationFile,
 	ImplementationResult,
 	PipelineState,
@@ -17,6 +21,8 @@ import {
 	StepState,
 	VerificationResult,
 } from '../types';
+
+const MAX_HISTORY_ENTRIES = 300;
 
 const STEP_TITLES: Record<StepId, string> = {
 	requirements: 'Anforderungsanalyse',
@@ -43,7 +49,23 @@ function initialState(): PipelineState {
 		steps: initialSteps(),
 		fileChanges: [],
 		busy: false,
+		abortRequested: false,
+		autoMode: false,
+		debugMode: false,
 	};
+}
+
+function toAbortSignal(token: vscode.CancellationToken): AbortSignal {
+	const controller = new AbortController();
+	if (token.isCancellationRequested) {
+		controller.abort();
+	} else {
+		const subscription = token.onCancellationRequested(() => {
+			controller.abort();
+			subscription.dispose();
+		});
+	}
+	return controller.signal;
 }
 
 function slugify(text: string): string {
@@ -71,7 +93,22 @@ export class PipelineController implements vscode.Disposable {
 	private additionalInfoHistory: string[] = [];
 	private implementationFeedback: string | undefined;
 	private verificationFeedback: string | undefined;
+	private verificationRetryCount = 0;
 	private cts: vscode.CancellationTokenSource | undefined;
+	private cancelledByUser = false;
+	private abortAfterCurrentStep = false;
+	private autoMode = false;
+	/** Cumulative per-file diff across every implementation round of the current run, keyed
+	 *  by workspace-relative path, so a round that leaves a file untouched doesn't erase the
+	 *  diff a previous round produced for it. */
+	private readonly fileChangeMap = new Map<string, FileChange>();
+
+	private debugMode = false;
+	private history: HistoryEntry[] = [];
+	private historySeq = 0;
+	private readonly historyEmitter = new vscode.EventEmitter<HistoryEntry[]>();
+	readonly onDidChangeHistory = this.historyEmitter.event;
+	private readonly outputChannel = vscode.window.createOutputChannel('Thunderstorm');
 
 	constructor() {
 		this.contentProviderRegistration = vscode.workspace.registerTextDocumentContentProvider(
@@ -90,6 +127,65 @@ export class PipelineController implements vscode.Disposable {
 
 	private emit(): void {
 		this.stateEmitter.fire(this.snapshot());
+	}
+
+	getHistory(): HistoryEntry[] {
+		return this.history.slice();
+	}
+
+	setDebugMode(enabled: boolean): void {
+		this.debugMode = enabled;
+		this.state.debugMode = enabled;
+		this.emit();
+	}
+
+	showDebugOutput(): void {
+		this.outputChannel.show();
+	}
+
+	/** Records one AI turn (success or failure) for the History view. `debug` is only attached
+	 *  when the debug mode was on for this turn, so ordinary runs stay lightweight. */
+	private recordHistory(entry: {
+		step: StepId;
+		title: string;
+		userInput: string;
+		result: string;
+		debug?: DebugInfo;
+	}): void {
+		const full: HistoryEntry = {
+			id: `h${++this.historySeq}`,
+			timestamp: Date.now(),
+			step: entry.step,
+			title: entry.title,
+			userInput: entry.userInput,
+			result: entry.result,
+			debug: this.debugMode ? entry.debug : undefined,
+		};
+		this.history.push(full);
+		if (this.history.length > MAX_HISTORY_ENTRIES) {
+			this.history.splice(0, this.history.length - MAX_HISTORY_ENTRIES);
+		}
+		this.historyEmitter.fire(this.history.slice());
+		if (full.debug) {
+			this.writeDebugOutput(full);
+		}
+	}
+
+	private writeDebugOutput(entry: HistoryEntry): void {
+		if (!entry.debug) {
+			return;
+		}
+		const lines: string[] = [
+			`\n=== [${new Date(entry.timestamp).toLocaleTimeString()}] ${entry.title} ===`,
+			`Modell: ${entry.debug.model.vendor}/${entry.debug.model.family} (${entry.debug.model.name})`,
+			'--- Prompt ---',
+			entry.debug.prompt,
+		];
+		for (const call of entry.debug.toolCalls ?? []) {
+			lines.push(`--- Tool-Aufruf: ${call.name}(${JSON.stringify(call.input)}) ---`, call.result);
+		}
+		lines.push('--- Antwort ---', entry.debug.rawResponse);
+		this.outputChannel.appendLine(lines.join('\n'));
 	}
 
 	private setStep(id: StepId, patch: Partial<StepState>): void {
@@ -113,13 +209,83 @@ export class PipelineController implements vscode.Disposable {
 		return this.cts.token;
 	}
 
+	/** Checks a queued "abort after current step" request. Call at the top of every
+	 *  step-transition method (before it marks anything 'active'). Returns true if the
+	 *  transition was cancelled and the caller must stop immediately. */
+	private checkAbortGate(): boolean {
+		if (!this.abortAfterCurrentStep) {
+			return false;
+		}
+		this.finishAborted();
+		return true;
+	}
+
+	private abortCurrentStep(id: StepId): void {
+		this.state.steps[id] = {
+			...this.state.steps[id],
+			status: 'aborted',
+			error: undefined,
+			detail: 'Vom Nutzer abgebrochen.',
+		};
+		this.finishAborted();
+	}
+
+	private finishAborted(): void {
+		this.abortAfterCurrentStep = false;
+		this.cancelledByUser = false;
+		for (const id of STEP_ORDER) {
+			const status = this.state.steps[id].status;
+			if (status === 'pending' || status === 'active') {
+				this.state.steps[id] = {
+					...this.state.steps[id],
+					status: 'skipped',
+					detail: 'Übersprungen: Vorgang wurde vom Nutzer abgebrochen.',
+				};
+			}
+		}
+		this.state.phase = 'aborted';
+		this.state.abortRequested = false;
+		this.state.busy = false;
+		this.emit();
+	}
+
+	/** Cancels the in-flight operation (if any) immediately. */
+	abortNow(): void {
+		if (this.state.phase !== 'running') {
+			return;
+		}
+		this.cancelledByUser = true;
+		this.abortAfterCurrentStep = false;
+		if (this.state.busy) {
+			this.cts?.cancel();
+		} else {
+			this.finishAborted();
+		}
+	}
+
+	/** Lets the current step finish, then stops before the next one starts. */
+	requestAbortAfterCurrentStep(): void {
+		if (this.state.phase !== 'running') {
+			return;
+		}
+		this.abortAfterCurrentStep = true;
+		this.state.abortRequested = true;
+		this.emit();
+	}
+
+	cancelAbortRequest(): void {
+		this.abortAfterCurrentStep = false;
+		this.state.abortRequested = false;
+		this.emit();
+	}
+
 	private getWorkspaceRoot(): string | undefined {
 		return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 	}
 
 	// ---- Schritt 1: Anforderungsanalyse -----------------------------------
 
-	async start(ticketText: string): Promise<void> {
+	async start(ticketText: string, autoMode: boolean): Promise<void> {
 		const trimmed = ticketText.trim();
 		if (!trimmed) {
 			return;
@@ -127,9 +293,16 @@ export class PipelineController implements vscode.Disposable {
 		this.state = initialState();
 		this.state.ticketText = trimmed;
 		this.state.phase = 'running';
+		this.state.autoMode = autoMode;
+		this.state.debugMode = this.debugMode;
+		this.autoMode = autoMode;
 		this.additionalInfoHistory = [];
 		this.implementationFeedback = undefined;
 		this.verificationFeedback = undefined;
+		this.verificationRetryCount = 0;
+		this.cancelledByUser = false;
+		this.abortAfterCurrentStep = false;
+		this.fileChangeMap.clear();
 		this.originalContentProvider.clear();
 		this.emit();
 		await this.runRequirementsCheck();
@@ -152,22 +325,45 @@ export class PipelineController implements vscode.Disposable {
 	}
 
 	private async runRequirementsCheck(): Promise<void> {
+		if (this.checkAbortGate()) {
+			return;
+		}
 		this.setStep('requirements', { status: 'active', detail: undefined, items: undefined, error: undefined });
 		this.setBusy(true);
+		const round = this.additionalInfoHistory.length;
+		const title = round > 0 ? `Anforderungsanalyse (erneute Prüfung ${round})` : 'Anforderungsanalyse';
+		const userInput =
+			this.state.ticketText +
+			(round > 0 ? `\n\nZusätzliche Informationen des Nutzers:\n${this.additionalInfoHistory.join('\n')}` : '');
 		try {
 			const config = getConfig();
-			const additionalInfo = this.additionalInfoHistory.length
+			const additionalInfo = round
 				? `Zusätzliche Informationen des Nutzers:\n${this.additionalInfoHistory.join('\n')}`
 				: '';
 			const prompt = renderTemplate(config.prompts.requirementsCheck, {
 				ticket: this.state.ticketText,
 				additionalInfo,
 			});
-			const response = await sendPrompt(config.models.requirementsCheck, prompt, this.newToken());
-			const result = extractJson<RequirementsCheckResult>(response);
+			const promptResult = await sendPrompt(config.models.requirementsCheck, prompt, this.newToken());
+			const result = extractJson<RequirementsCheckResult>(promptResult.text);
+
+			this.recordHistory({
+				step: 'requirements',
+				title,
+				userInput,
+				result: result.ready
+					? `Bereit für Implementierung. ${result.feedback}`
+					: `Weitere Informationen nötig: ${(result.missingDetails ?? []).join('; ') || result.feedback}`,
+				debug: { model: promptResult.model, prompt, rawResponse: promptResult.text },
+			});
 
 			if (result.ready) {
-				this.setStep('requirements', { status: 'waitingApproval', detail: result.feedback, items: [] });
+				if (this.autoMode) {
+					this.setStep('requirements', { status: 'completed', detail: result.feedback, items: [] });
+					await this.runImplementation();
+				} else {
+					this.setStep('requirements', { status: 'waitingApproval', detail: result.feedback, items: [] });
+				}
 			} else {
 				this.setStep('requirements', {
 					status: 'waitingInput',
@@ -176,7 +372,13 @@ export class PipelineController implements vscode.Disposable {
 				});
 			}
 		} catch (err) {
-			this.handleStepError('requirements', err);
+			if (this.cancelledByUser) {
+				this.abortCurrentStep('requirements');
+			} else {
+				const message = err instanceof Error ? err.message : String(err);
+				this.recordHistory({ step: 'requirements', title, userInput, result: `Fehler: ${message}` });
+				this.handleStepError('requirements', err);
+			}
 		} finally {
 			this.setBusy(false);
 		}
@@ -189,6 +391,7 @@ export class PipelineController implements vscode.Disposable {
 			return;
 		}
 		this.implementationFeedback = feedback.trim();
+		this.verificationRetryCount = 0;
 		await this.runImplementation();
 	}
 
@@ -196,6 +399,10 @@ export class PipelineController implements vscode.Disposable {
 		if (this.state.steps.implementation.status !== 'waitingApproval') {
 			return;
 		}
+		await this.autoAdvanceToVerification();
+	}
+
+	private async autoAdvanceToVerification(): Promise<void> {
 		this.setStep('implementation', { status: 'completed' });
 		await this.runVerification();
 	}
@@ -212,7 +419,14 @@ export class PipelineController implements vscode.Disposable {
 	}
 
 	private async runImplementation(): Promise<void> {
+		if (this.checkAbortGate()) {
+			return;
+		}
 		const root = this.getWorkspaceRoot();
+		const title =
+			this.verificationRetryCount > 0
+				? `Implementierung (Korrekturversuch ${this.verificationRetryCount})`
+				: 'Implementierung';
 		this.setStep('implementation', { status: 'active', detail: undefined, error: undefined });
 		this.setBusy(true);
 		try {
@@ -220,6 +434,7 @@ export class PipelineController implements vscode.Disposable {
 				throw new Error('Kein Workspace-Ordner geöffnet. Bitte öffnen Sie einen Ordner, um Code-Änderungen zu generieren.');
 			}
 			const config = getConfig();
+			const token = this.newToken();
 			const workspaceContext = await gatherWorkspaceContext();
 			const additionalInfo = this.buildImplementationFeedbackNote();
 			const prompt = renderTemplate(config.prompts.implementation, {
@@ -227,48 +442,95 @@ export class PipelineController implements vscode.Disposable {
 				workspaceContext,
 				additionalInfo,
 			});
-			const response = await sendPrompt(config.models.implementation, prompt, this.newToken());
-			const result = extractJson<ImplementationResult>(response);
+			const userInput = this.state.ticketText + (additionalInfo ? `\n\n${additionalInfo}` : '');
+			const promptResult = await sendPromptWithTools(
+				config.models.implementation,
+				prompt,
+				createWorkspaceTools(root),
+				token
+			);
+			const result = extractJson<ImplementationResult>(promptResult.text);
 
 			const fileChanges = await this.applyFileChanges(root, result.files ?? []);
 			this.state.fileChanges = fileChanges;
 			this.state.prTitle = result.summary;
 			this.state.prExplanation = result.explanation;
 
-			this.setStep('implementation', {
-				status: 'waitingApproval',
-				detail: result.explanation,
-				items: fileChanges.map((f) => f.path),
+			const changedPaths = (result.files ?? []).map((f) => f.path);
+			this.recordHistory({
+				step: 'implementation',
+				title,
+				userInput,
+				result: `${result.summary}\n${result.explanation}\nGeänderte Dateien in dieser Runde: ${
+					changedPaths.length ? changedPaths.join(', ') : '(keine)'
+				}`,
+				debug: {
+					model: promptResult.model,
+					prompt,
+					toolCalls: promptResult.toolCalls,
+					rawResponse: promptResult.text,
+				},
 			});
+
+			if (this.autoMode) {
+				this.setStep('implementation', {
+					status: 'completed',
+					detail: result.explanation,
+					items: fileChanges.map((f) => f.path),
+				});
+				await this.runVerification();
+			} else {
+				this.setStep('implementation', {
+					status: 'waitingApproval',
+					detail: result.explanation,
+					items: fileChanges.map((f) => f.path),
+				});
+			}
 		} catch (err) {
-			this.handleStepError('implementation', err);
+			if (this.cancelledByUser) {
+				this.abortCurrentStep('implementation');
+			} else {
+				const message = err instanceof Error ? err.message : String(err);
+				this.recordHistory({
+					step: 'implementation',
+					title,
+					userInput: this.state.ticketText,
+					result: `Fehler: ${message}`,
+				});
+				this.handleStepError('implementation', err);
+			}
 		} finally {
 			this.setBusy(false);
 		}
 	}
 
+	/** Writes the model's file changes to disk and merges them into the cumulative
+	 *  {@link fileChangeMap} for this run, so that a later round which leaves a file
+	 *  untouched (or reports no changes at all) doesn't erase an earlier round's diff for it. */
 	private async applyFileChanges(root: string, files: ImplementationFile[]): Promise<FileChange[]> {
-		const normalizedRoot = path.resolve(root);
-		const changes: FileChange[] = [];
 		for (const file of files) {
 			const relPath = file.path.replace(/^[/\\]+/, '');
-			const absPath = path.resolve(normalizedRoot, relPath);
-			if (absPath !== normalizedRoot && !absPath.startsWith(normalizedRoot + path.sep)) {
-				throw new Error(`Ungültiger Dateipfad außerhalb des Workspace: "${file.path}"`);
-			}
+			const absPath = resolveWorkspacePath(root, relPath);
 			const absUri = vscode.Uri.file(absPath);
-			let originalContent: string | null = null;
-			try {
-				const bytes = await vscode.workspace.fs.readFile(absUri);
-				originalContent = Buffer.from(bytes).toString('utf8');
-			} catch {
-				originalContent = null;
+
+			const existing = this.fileChangeMap.get(relPath);
+			let originalContent: string | null;
+			if (existing) {
+				originalContent = existing.originalContent;
+			} else {
+				try {
+					const bytes = await vscode.workspace.fs.readFile(absUri);
+					originalContent = Buffer.from(bytes).toString('utf8');
+				} catch {
+					originalContent = null;
+				}
 			}
+
 			await vscode.workspace.fs.writeFile(absUri, Buffer.from(file.content, 'utf8'));
 			this.originalContentProvider.set(relPath, originalContent ?? '');
-			changes.push({ path: relPath, originalContent, newContent: file.content });
+			this.fileChangeMap.set(relPath, { path: relPath, originalContent, newContent: file.content });
 		}
-		return changes;
+		return Array.from(this.fileChangeMap.values());
 	}
 
 	// ---- Schritt 3: Verifizierung ------------------------------------------
@@ -277,6 +539,7 @@ export class PipelineController implements vscode.Disposable {
 		if (this.state.steps.verification.status !== 'waitingInput') {
 			return;
 		}
+		this.verificationRetryCount = 0;
 		await this.runImplementation();
 	}
 
@@ -301,6 +564,11 @@ export class PipelineController implements vscode.Disposable {
 	}
 
 	private async runVerification(): Promise<void> {
+		if (this.checkAbortGate()) {
+			return;
+		}
+		const title =
+			this.verificationRetryCount > 0 ? `Verifizierung (nach Korrekturversuch ${this.verificationRetryCount})` : 'Verifizierung';
 		this.setStep('verification', { status: 'active', detail: undefined, error: undefined });
 		this.setBusy(true);
 		try {
@@ -311,22 +579,72 @@ export class PipelineController implements vscode.Disposable {
 				implementationSummary: `${this.state.prTitle ?? ''}\n${this.state.prExplanation ?? ''}`,
 				diff,
 			});
-			const response = await sendPrompt(config.models.verification, prompt, this.newToken());
-			const result = extractJson<VerificationResult>(response);
+			const userInput = `Ticket: ${this.state.ticketText}\n\nZu verifizierende Implementierung: ${this.state.prTitle ?? ''}\n${
+				this.state.prExplanation ?? ''
+			}`;
+			const promptResult = await sendPrompt(config.models.verification, prompt, this.newToken());
+			const result = extractJson<VerificationResult>(promptResult.text);
+
+			this.recordHistory({
+				step: 'verification',
+				title,
+				userInput,
+				result: result.passed
+					? `Bestanden. ${result.feedback}`
+					: `Abweichungen gefunden: ${(result.deviations ?? []).join('; ')}. ${result.feedback}`,
+				debug: { model: promptResult.model, prompt, rawResponse: promptResult.text },
+			});
 
 			if (result.passed) {
 				this.verificationFeedback = undefined;
-				this.setStep('verification', { status: 'waitingApproval', detail: result.feedback, items: [] });
+				this.verificationRetryCount = 0;
+				if (this.autoMode) {
+					this.setStep('verification', { status: 'completed', detail: result.feedback, items: [] });
+					await this.runPullRequest();
+				} else {
+					this.setStep('verification', { status: 'waitingApproval', detail: result.feedback, items: [] });
+				}
 			} else {
 				this.verificationFeedback = `${result.feedback}\n- ${(result.deviations ?? []).join('\n- ')}`;
+				const maxRetries = config.verification.maxAutoRetries;
+
+				if (this.verificationRetryCount < maxRetries) {
+					this.verificationRetryCount++;
+					this.setStep('verification', {
+						status: 'active',
+						detail: `${result.feedback} Automatischer Korrekturversuch ${this.verificationRetryCount}/${maxRetries} wird gestartet.`,
+						items: result.deviations ?? [],
+					});
+
+					await this.runImplementation();
+					if (this.state.steps.implementation.status === 'waitingApproval') {
+						await this.autoAdvanceToVerification();
+					}
+					return;
+				}
+
 				this.setStep('verification', {
 					status: 'waitingInput',
-					detail: result.feedback,
+					detail:
+						maxRetries > 0
+							? `${result.feedback} (maximale Anzahl automatischer Korrekturversuche erreicht)`
+							: result.feedback,
 					items: result.deviations ?? [],
 				});
 			}
 		} catch (err) {
-			this.handleStepError('verification', err);
+			if (this.cancelledByUser) {
+				this.abortCurrentStep('verification');
+			} else {
+				const message = err instanceof Error ? err.message : String(err);
+				this.recordHistory({
+					step: 'verification',
+					title,
+					userInput: this.state.ticketText,
+					result: `Fehler: ${message}`,
+				});
+				this.handleStepError('verification', err);
+			}
 		} finally {
 			this.setBusy(false);
 		}
@@ -341,6 +659,9 @@ export class PipelineController implements vscode.Disposable {
 	// ---- Schritt 4: Pull Request --------------------------------------------
 
 	private async runPullRequest(): Promise<void> {
+		if (this.checkAbortGate()) {
+			return;
+		}
 		const root = this.getWorkspaceRoot();
 		this.setStep('pullRequest', { status: 'active', detail: undefined, error: undefined });
 		this.setBusy(true);
@@ -349,7 +670,8 @@ export class PipelineController implements vscode.Disposable {
 				throw new Error('Kein Workspace-Ordner geöffnet.');
 			}
 			const config = getConfig();
-			const git = new GitService(root);
+			const token = this.newToken();
+			const git = new GitService(root, toAbortSignal(token));
 
 			if (!(await git.isRepository())) {
 				this.setStep('pullRequest', {
@@ -434,7 +756,11 @@ export class PipelineController implements vscode.Disposable {
 			}
 			await this.moveToUserVerification();
 		} catch (err) {
-			this.handleStepError('pullRequest', err);
+			if (this.cancelledByUser) {
+				this.abortCurrentStep('pullRequest');
+			} else {
+				this.handleStepError('pullRequest', err);
+			}
 		} finally {
 			this.setBusy(false);
 		}
@@ -443,6 +769,9 @@ export class PipelineController implements vscode.Disposable {
 	// ---- Schritt 5: Nutzer-Abnahme ------------------------------------------
 
 	private async moveToUserVerification(): Promise<void> {
+		if (this.checkAbortGate()) {
+			return;
+		}
 		this.setStep('userVerification', {
 			status: 'waitingApproval',
 			detail: 'Bitte führen Sie lokale Tests aus und prüfen Sie die Änderungen manuell. Geben Sie den Vorgang anschließend frei.',
@@ -515,7 +844,13 @@ export class PipelineController implements vscode.Disposable {
 		this.additionalInfoHistory = [];
 		this.implementationFeedback = undefined;
 		this.verificationFeedback = undefined;
+		this.verificationRetryCount = 0;
+		this.cancelledByUser = false;
+		this.abortAfterCurrentStep = false;
+		this.autoMode = false;
+		this.fileChangeMap.clear();
 		this.originalContentProvider.clear();
+		this.state.debugMode = this.debugMode;
 		this.emit();
 	}
 
@@ -524,5 +859,7 @@ export class PipelineController implements vscode.Disposable {
 		this.cts?.dispose();
 		this.contentProviderRegistration.dispose();
 		this.stateEmitter.dispose();
+		this.historyEmitter.dispose();
+		this.outputChannel.dispose();
 	}
 }

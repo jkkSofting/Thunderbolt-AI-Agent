@@ -2,7 +2,7 @@
   "name": "thunderstorm",
   "displayName": "Thunderstorm",
   "description": "Generiert, verifiziert und verpackt Code-Änderungen aus einer Ticket-Beschreibung als Pull Request – gesteuert über eine konfigurierbare KI-Pipeline auf Basis der VS Code Language Model API und GitHub Copilot.",
-  "version": "0.0.1",
+  "version": "0.0.4",
   "publisher": "thunderstorm-local",
   "private": true,
   "engines": {
@@ -57,6 +57,18 @@
       {
         "command": "thunderstorm.listModels",
         "title": "Thunderstorm: Verfügbare Sprachmodelle anzeigen"
+      },
+      {
+        "command": "thunderstorm.abortNow",
+        "title": "Thunderstorm: Sofort abbrechen"
+      },
+      {
+        "command": "thunderstorm.abortAfterCurrentStep",
+        "title": "Thunderstorm: Nach aktuellem Schritt abbrechen"
+      },
+      {
+        "command": "thunderstorm.showDebugOutput",
+        "title": "Thunderstorm: Debug-Ausgabe anzeigen"
       }
     ],
     "configuration": {
@@ -101,7 +113,7 @@
         "thunderstorm.prompts.implementation": {
           "type": "string",
           "editPresentation": "multilineText",
-          "default": "Du bist ein erfahrener Softwareentwickler. Implementiere die folgende Anforderung im aktuellen Workspace anhand des bereitgestellten Kontexts.\n\nAntworte AUSSCHLIESSLICH mit einem JSON-Objekt ohne Markdown-Formatierung nach folgendem Schema:\n{\"summary\": string, \"explanation\": string, \"files\": [{\"path\": string, \"content\": string}]}\n\n- \"summary\": prägnanter Ein-Zeiler, geeignet als Commit-/PR-Titel.\n- \"explanation\": verständliche Zusammenfassung, was genau geändert wurde und warum.\n- \"files\": jede betroffene Datei mit workspace-relativem Pfad und VOLLSTÄNDIGEM neuen Dateiinhalt (kein Diff, keine Auslassungen).\n\nTicket-Beschreibung:\n{{ticket}}\n\nWorkspace-Kontext:\n{{workspaceContext}}\n\n{{additionalInfo}}",
+          "default": "Du bist ein erfahrener Softwareentwickler. Implementiere die folgende Anforderung im aktuellen Workspace anhand des bereitgestellten Kontexts. Der Workspace-Kontext unten ist nur ein grober Überblick (Dateibaum, ggf. offene Editoren) – nutze die verfügbaren Tools (Dateien auflisten/lesen), um dir vor der Änderung den tatsächlichen Inhalt jeder relevanten Datei anzusehen, statt zu raten.\n\nAntworte am Ende AUSSCHLIESSLICH mit einem JSON-Objekt ohne Markdown-Formatierung nach folgendem Schema:\n{\"summary\": string, \"explanation\": string, \"files\": [{\"path\": string, \"content\": string}]}\n\n- \"summary\": prägnanter Ein-Zeiler, geeignet als Commit-/PR-Titel.\n- \"explanation\": verständliche Zusammenfassung, was genau geändert wurde und warum.\n- \"files\": jede betroffene Datei mit workspace-relativem Pfad und VOLLSTÄNDIGEM neuen Dateiinhalt (kein Diff, keine Auslassungen). Nur tatsächlich geänderte Dateien auflisten; ist keine Änderung nötig, ein leeres Array zurückgeben.\n\nTicket-Beschreibung:\n{{ticket}}\n\nWorkspace-Kontext:\n{{workspaceContext}}\n\n{{additionalInfo}}",
           "markdownDescription": "Prompt-Vorlage für Schritt 2 (Implementierung). Verfügbare Platzhalter: `{{ticket}}`, `{{workspaceContext}}`, `{{additionalInfo}}`."
         },
         "thunderstorm.prompts.verification": {
@@ -124,6 +136,12 @@
           "type": "boolean",
           "default": true,
           "description": "Wenn aktiviert, versucht Thunderstorm nach der Verifizierung automatisch einen Pull Request über die GitHub CLI (gh) zu erstellen. Ist dies nicht möglich (z. B. fehlende Rechte, kein Remote), verbleiben die Änderungen als lokaler Commit."
+        },
+        "thunderstorm.verification.maxAutoRetries": {
+          "type": "number",
+          "default": 4,
+          "minimum": 0,
+          "description": "Anzahl automatischer Korrekturversuche: Findet Schritt 3 (Verifizierung) Abweichungen, startet Thunderstorm Schritt 2 (Implementierung) automatisch neu, bis die Anforderungen erfüllt sind oder dieses Limit erreicht ist. Bei 0 ist die Automatik deaktiviert und es erscheint sofort die manuelle Rückfrage."
         }
       }
     }
