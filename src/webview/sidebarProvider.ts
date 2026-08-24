@@ -1,12 +1,15 @@
 import * as vscode from 'vscode';
 import { getSidebarHtml } from './getHtml';
 import { PipelineController } from '../pipeline/pipelineController';
+import { getPipelineDefinition, parsePipelineDefinition, savePipelineDefinition } from '../config';
 
 interface InboundMessage {
 	type: string;
 	text?: string;
+	stageId?: string;
 	autoMode?: boolean;
 	enabled?: boolean;
+	stages?: unknown;
 }
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
@@ -40,38 +43,54 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 		this.view?.show?.(true);
 	}
 
+	private sendPipelineDefinition(): void {
+		this.view?.webview.postMessage({ type: 'pipelineDefinition', definition: getPipelineDefinition() });
+	}
+
 	private async handleMessage(message: InboundMessage): Promise<void> {
 		switch (message.type) {
 			case 'ready':
 				this.view?.webview.postMessage({ type: 'state', state: this.controller.getState() });
 				this.view?.webview.postMessage({ type: 'history', entries: this.controller.getHistory() });
+				this.sendPipelineDefinition();
 				return;
 			case 'start':
 				await this.controller.start(message.text ?? '', !!message.autoMode);
 				return;
-			case 'provideInfo':
-				await this.controller.submitAdditionalInfo(message.text ?? '');
+			case 'submitAdditionalInfo':
+				if (message.stageId) {
+					await this.controller.submitAdditionalInfo(message.stageId, message.text ?? '');
+				}
 				return;
-			case 'approveRequirements':
-				await this.controller.approveRequirements();
+			case 'approveStage':
+				if (message.stageId) {
+					await this.controller.approveStage(message.stageId);
+				}
 				return;
-			case 'approveImplementation':
-				await this.controller.approveImplementation();
+			case 'requestStageChanges':
+				if (message.stageId) {
+					await this.controller.requestStageChanges(message.stageId, message.text ?? '');
+				}
 				return;
-			case 'requestImplementationChanges':
-				await this.controller.requestImplementationChanges(message.text ?? '');
+			case 'retryGateTarget':
+				if (message.stageId) {
+					await this.controller.retryGateTarget(message.stageId);
+				}
 				return;
-			case 'approveForPullRequest':
-				await this.controller.approveForPullRequest();
+			case 'forceGateContinue':
+				if (message.stageId) {
+					await this.controller.forceGateContinue(message.stageId);
+				}
 				return;
-			case 'reimplementAfterVerification':
-				await this.controller.reimplementAfterVerification();
+			case 'proceedAutonomously':
+				if (message.stageId) {
+					await this.controller.proceedAutonomously(message.stageId);
+				}
 				return;
-			case 'forceProceedToPullRequest':
-				await this.controller.forceProceedToPullRequest();
-				return;
-			case 'completeUserVerification':
-				await this.controller.completeUserVerification();
+			case 'completeUserApproval':
+				if (message.stageId) {
+					await this.controller.completeUserApproval(message.stageId);
+				}
 				return;
 			case 'showDiff':
 				await this.controller.showDiff();
@@ -102,6 +121,33 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 			case 'reset':
 				this.controller.reset();
 				return;
+			case 'requestPipelineDefinition':
+				this.sendPipelineDefinition();
+				return;
+			case 'savePipelineDefinition': {
+				const submittedCount = Array.isArray(message.stages) ? message.stages.length : 0;
+				let definition;
+				let errorMessage: string | undefined;
+				try {
+					definition = parsePipelineDefinition(message.stages);
+					await savePipelineDefinition(definition);
+				} catch (err) {
+					errorMessage = err instanceof Error ? err.message : String(err);
+				}
+				this.sendPipelineDefinition();
+				const droppedCount = definition && submittedCount > 0 ? submittedCount - definition.stages.length : 0;
+				this.view?.webview.postMessage({ type: 'saveResult', ok: !errorMessage, droppedCount, errorMessage });
+				if (errorMessage) {
+					vscode.window.showErrorMessage(`Thunderstorm: Pipeline-Konfiguration konnte nicht gespeichert werden: ${errorMessage}`);
+				} else if (droppedCount > 0) {
+					vscode.window.showWarningMessage(
+						`Thunderstorm: ${droppedCount} von ${submittedCount} Stufe(n) waren ungültig und wurden beim Speichern verworfen. Details in der Konsole "Thunderstorm" (Hilfe → Toggle Developer Tools) bzw. den Extension-Host-Logs.`
+					);
+				} else {
+					vscode.window.showInformationMessage('Thunderstorm: Pipeline-Konfiguration gespeichert.');
+				}
+				return;
+			}
 			default:
 				return;
 		}

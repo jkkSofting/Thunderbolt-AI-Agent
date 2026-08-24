@@ -1,57 +1,56 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { getConfig } from '../config';
-import { sendPrompt, sendPromptWithTools } from '../llm/lmClient';
+import { getPipelineDefinition } from '../config';
+import { PromptResult, sendPrompt, sendPromptWithTools } from '../llm/lmClient';
 import { createWorkspaceTools } from '../llm/workspaceTools';
 import { renderTemplate } from '../utils/template';
 import { extractJson } from '../utils/json';
-import { resolveWorkspacePath } from '../utils/paths';
 import { gatherWorkspaceContext } from '../context/workspaceContext';
 import { GitService } from '../git/gitService';
 import { OriginalContentProvider, THUNDERSTORM_ORIGINAL_SCHEME } from '../diff/originalContentProvider';
+import { DEFAULT_PIPELINE } from './defaultPipeline';
 import {
+	AiStageDefinition,
 	DebugInfo,
+	DebugToolCallInfo,
 	FileChange,
+	GateVerdict,
+	GitPrStageDefinition,
 	HistoryEntry,
-	ImplementationFile,
-	ImplementationResult,
+	PipelineDefinition,
 	PipelineState,
-	RequirementsCheckResult,
-	StepId,
-	StepState,
-	VerificationResult,
+	ResolvedModelInfo,
+	StageId,
+	StageRuntimeState,
+	UsageInfo,
+	UserApprovalStageDefinition,
 } from '../types';
 
 const MAX_HISTORY_ENTRIES = 300;
+/** Safety net against a misconfigured retry graph (e.g. two gates retrying each other)
+ *  looping effectively forever and burning API calls. */
+const MAX_TOTAL_STAGE_RUNS = 100;
 
-const STEP_TITLES: Record<StepId, string> = {
-	requirements: 'Anforderungsanalyse',
-	implementation: 'Implementierung',
-	verification: 'Verifizierung',
-	pullRequest: 'Pull Request',
-	userVerification: 'Nutzer-Abnahme',
-};
+const GATE_INSTRUCTION_SUFFIX =
+	'\n\nAntworte am Ende zusätzlich mit einem eigenen JSON-Objekt auf einer neuen Zeile (kein Markdown), das dein Ergebnis bewertet:\n{"ok": boolean, "feedback": string, "details": string[]}\n- "ok": true, wenn aus deiner Sicht kein Grund besteht, diesen Schritt zu wiederholen oder auf eine Rückmeldung zu warten.\n- "feedback": kurze, für den Nutzer verständliche Begründung.\n- "details": Liste konkreter Punkte (leer, wenn ok true ist).';
 
-const STEP_ORDER: StepId[] = ['requirements', 'implementation', 'verification', 'pullRequest', 'userVerification'];
+type StageOutcome = { type: 'advance'; nextIndex: number } | { type: 'stop' };
 
-function initialSteps(): Record<StepId, StepState> {
-	const steps = {} as Record<StepId, StepState>;
-	for (const id of STEP_ORDER) {
-		steps[id] = { id, title: STEP_TITLES[id], status: 'pending' };
-	}
-	return steps;
+function initialStages(definition: PipelineDefinition): StageRuntimeState[] {
+	return definition.stages.map((s) => ({ id: s.id, name: s.name, type: s.type, status: 'pending' }));
 }
 
-function initialState(): PipelineState {
+function initialState(definition: PipelineDefinition): PipelineState {
 	return {
 		phase: 'idle',
 		ticketText: '',
-		steps: initialSteps(),
+		stages: initialStages(definition),
 		fileChanges: [],
 		busy: false,
 		abortRequested: false,
 		autoMode: false,
 		debugMode: false,
+		usage: { requests: 0, inputTokens: 0, outputTokens: 0 },
 	};
 }
 
@@ -83,25 +82,29 @@ function truncate(text: string, max = 3000): string {
 }
 
 export class PipelineController implements vscode.Disposable {
-	private state: PipelineState = initialState();
+	private definition: PipelineDefinition = DEFAULT_PIPELINE;
+	private state: PipelineState = initialState(this.definition);
 	private readonly stateEmitter = new vscode.EventEmitter<PipelineState>();
 	readonly onDidChangeState = this.stateEmitter.event;
 
 	private readonly originalContentProvider = new OriginalContentProvider();
 	private readonly contentProviderRegistration: vscode.Disposable;
 
-	private additionalInfoHistory: string[] = [];
-	private implementationFeedback: string | undefined;
-	private verificationFeedback: string | undefined;
-	private verificationRetryCount = 0;
+	private readonly fileChangeMap = new Map<string, FileChange>();
+	private readonly gateRetryCounts = new Map<StageId, number>();
+	/** Accumulates every round's user-supplied/auto-injected note per stage (never overwritten),
+	 *  so a second "Erneut prüfen" round still carries forward what was said in the first. */
+	private readonly pendingAdditionalInfo = new Map<StageId, string[]>();
+	private contextLog: { stageName: string; text: string }[] = [];
+	private lastStageResultText = '';
+	private activeRetryJump: { gateIndex: number } | undefined;
+
 	private cts: vscode.CancellationTokenSource | undefined;
 	private cancelledByUser = false;
 	private abortAfterCurrentStep = false;
 	private autoMode = false;
-	/** Cumulative per-file diff across every implementation round of the current run, keyed
-	 *  by workspace-relative path, so a round that leaves a file untouched doesn't erase the
-	 *  diff a previous round produced for it. */
-	private readonly fileChangeMap = new Map<string, FileChange>();
+
+	private usage: UsageInfo = { requests: 0, inputTokens: 0, outputTokens: 0 };
 
 	private debugMode = false;
 	private history: HistoryEntry[] = [];
@@ -143,22 +146,40 @@ export class PipelineController implements vscode.Disposable {
 		this.outputChannel.show();
 	}
 
-	/** Records one AI turn (success or failure) for the History view. `debug` is only attached
-	 *  when the debug mode was on for this turn, so ordinary runs stay lightweight. */
+	/** Adds one LM call's usage to the running total for this pipeline run. `requests` is the
+	 *  real, billable unit (one Copilot chat request); the token counts are an estimate. */
+	private addUsage(usage: UsageInfo): void {
+		this.usage = {
+			requests: this.usage.requests + usage.requests,
+			inputTokens: this.usage.inputTokens + usage.inputTokens,
+			outputTokens: this.usage.outputTokens + usage.outputTokens,
+		};
+		this.state.usage = this.usage;
+		this.emit();
+	}
+
+	/** Records one AI turn (success or failure) for the History view. `model` (which model
+	 *  actually answered) is always kept, even outside Debug-Modus, so "was the right model
+	 *  used" can always be checked; `debug` (full prompt/tool-call trace) is only attached when
+	 *  the debug mode was on for this turn, so ordinary runs stay lightweight. */
 	private recordHistory(entry: {
-		step: StepId;
+		stageId: StageId;
 		title: string;
 		userInput: string;
 		result: string;
+		configuredModel?: { vendor: string; family: string };
+		model?: ResolvedModelInfo;
 		debug?: DebugInfo;
 	}): void {
 		const full: HistoryEntry = {
 			id: `h${++this.historySeq}`,
 			timestamp: Date.now(),
-			step: entry.step,
+			stageId: entry.stageId,
 			title: entry.title,
 			userInput: entry.userInput,
 			result: entry.result,
+			configuredModel: entry.configuredModel,
+			model: entry.model,
 			debug: this.debugMode ? entry.debug : undefined,
 		};
 		this.history.push(full);
@@ -188,8 +209,16 @@ export class PipelineController implements vscode.Disposable {
 		this.outputChannel.appendLine(lines.join('\n'));
 	}
 
-	private setStep(id: StepId, patch: Partial<StepState>): void {
-		this.state.steps[id] = { ...this.state.steps[id], ...patch };
+	private stageIndex(id: StageId): number {
+		return this.definition.stages.findIndex((s) => s.id === id);
+	}
+
+	private getStageState(id: StageId): StageRuntimeState | undefined {
+		return this.state.stages.find((s) => s.id === id);
+	}
+
+	private setStageState(id: StageId, patch: Partial<StageRuntimeState>): void {
+		this.state.stages = this.state.stages.map((s) => (s.id === id ? { ...s, ...patch } : s));
 		this.emit();
 	}
 
@@ -198,20 +227,60 @@ export class PipelineController implements vscode.Disposable {
 		this.emit();
 	}
 
-	private handleStepError(id: StepId, err: unknown): void {
-		const message = err instanceof Error ? err.message : String(err);
-		this.setStep(id, { status: 'error', error: message });
-	}
-
 	private newToken(): vscode.CancellationToken {
 		this.cts?.dispose();
 		this.cts = new vscode.CancellationTokenSource();
 		return this.cts.token;
 	}
 
-	/** Checks a queued "abort after current step" request. Call at the top of every
-	 *  step-transition method (before it marks anything 'active'). Returns true if the
-	 *  transition was cancelled and the caller must stop immediately. */
+	private getWorkspaceRoot(): string | undefined {
+		return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+	}
+
+	private addPendingInfo(stageId: StageId, note: string): void {
+		const list = this.pendingAdditionalInfo.get(stageId) ?? [];
+		list.push(note);
+		this.pendingAdditionalInfo.set(stageId, list);
+	}
+
+	private mergeFileChange(change: FileChange): void {
+		const existing = this.fileChangeMap.get(change.path);
+		const originalContent = existing ? existing.originalContent : change.originalContent;
+		this.fileChangeMap.set(change.path, { path: change.path, originalContent, newContent: change.newContent });
+		this.state.fileChanges = Array.from(this.fileChangeMap.values());
+		this.originalContentProvider.set(change.path, originalContent ?? '');
+	}
+
+	private formatFileDiffSummary(change: FileChange): string {
+		const original = change.originalContent === null ? '(neue Datei)' : truncate(change.originalContent);
+		const updated = truncate(change.newContent);
+		return `Datei: ${change.path}\n--- vorher ---\n${original}\n--- nachher ---\n${updated}`;
+	}
+
+	private formatCumulativeFileChanges(): string {
+		if (this.fileChangeMap.size === 0) {
+			return '(keine Änderungen bisher)';
+		}
+		return Array.from(this.fileChangeMap.values())
+			.map((f) => this.formatFileDiffSummary(f))
+			.join('\n\n');
+	}
+
+	private formatContextLog(): string {
+		return this.contextLog.map((e) => `### ${e.stageName} ###\n${e.text}`).join('\n\n');
+	}
+
+	private derivePrTitle(): string {
+		const firstLine = (this.state.ticketText.split('\n')[0] ?? '').trim();
+		const truncated = firstLine.length > 72 ? `${firstLine.slice(0, 69)}...` : firstLine;
+		return `Thunderstorm: ${truncated || 'Automatische Änderung'}`;
+	}
+
+	// ---- Abbruch ------------------------------------------------------------
+
+	/** Checks a queued "abort after current step" request. Call at the top of every loop
+	 *  iteration in {@link advanceFrom}. Returns true if the run was cancelled and the caller
+	 *  must stop immediately. */
 	private checkAbortGate(): boolean {
 		if (!this.abortAfterCurrentStep) {
 			return false;
@@ -220,36 +289,25 @@ export class PipelineController implements vscode.Disposable {
 		return true;
 	}
 
-	private abortCurrentStep(id: StepId): void {
-		this.state.steps[id] = {
-			...this.state.steps[id],
-			status: 'aborted',
-			error: undefined,
-			detail: 'Vom Nutzer abgebrochen.',
-		};
+	private abortCurrentStep(id: StageId): void {
+		this.setStageState(id, { status: 'aborted', error: undefined, detail: 'Vom Nutzer abgebrochen.' });
 		this.finishAborted();
 	}
 
 	private finishAborted(): void {
 		this.abortAfterCurrentStep = false;
 		this.cancelledByUser = false;
-		for (const id of STEP_ORDER) {
-			const status = this.state.steps[id].status;
-			if (status === 'pending' || status === 'active') {
-				this.state.steps[id] = {
-					...this.state.steps[id],
-					status: 'skipped',
-					detail: 'Übersprungen: Vorgang wurde vom Nutzer abgebrochen.',
-				};
-			}
-		}
+		this.state.stages = this.state.stages.map((s) =>
+			s.status === 'pending' || s.status === 'active'
+				? { ...s, status: 'skipped', detail: 'Übersprungen: Vorgang wurde vom Nutzer abgebrochen.' }
+				: s
+		);
 		this.state.phase = 'aborted';
 		this.state.abortRequested = false;
 		this.state.busy = false;
 		this.emit();
 	}
 
-	/** Cancels the in-flight operation (if any) immediately. */
 	abortNow(): void {
 		if (this.state.phase !== 'running') {
 			return;
@@ -263,7 +321,6 @@ export class PipelineController implements vscode.Disposable {
 		}
 	}
 
-	/** Lets the current step finish, then stops before the next one starts. */
 	requestAbortAfterCurrentStep(): void {
 		if (this.state.phase !== 'running') {
 			return;
@@ -279,413 +336,356 @@ export class PipelineController implements vscode.Disposable {
 		this.emit();
 	}
 
-	private getWorkspaceRoot(): string | undefined {
-		return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-	}
-
-	// ---- Schritt 1: Anforderungsanalyse -----------------------------------
+	// ---- Ablaufsteuerung ------------------------------------------------------
 
 	async start(ticketText: string, autoMode: boolean): Promise<void> {
 		const trimmed = ticketText.trim();
 		if (!trimmed) {
 			return;
 		}
-		this.state = initialState();
+		this.definition = getPipelineDefinition();
+		this.state = initialState(this.definition);
 		this.state.ticketText = trimmed;
 		this.state.phase = 'running';
 		this.state.autoMode = autoMode;
 		this.state.debugMode = this.debugMode;
 		this.autoMode = autoMode;
-		this.additionalInfoHistory = [];
-		this.implementationFeedback = undefined;
-		this.verificationFeedback = undefined;
-		this.verificationRetryCount = 0;
+		this.fileChangeMap.clear();
+		this.gateRetryCounts.clear();
+		this.pendingAdditionalInfo.clear();
+		this.contextLog = [];
+		this.lastStageResultText = '';
+		this.activeRetryJump = undefined;
 		this.cancelledByUser = false;
 		this.abortAfterCurrentStep = false;
-		this.fileChangeMap.clear();
+		this.usage = { requests: 0, inputTokens: 0, outputTokens: 0 };
 		this.originalContentProvider.clear();
 		this.emit();
-		await this.runRequirementsCheck();
+		await this.advanceFrom(0);
 	}
 
-	async submitAdditionalInfo(text: string): Promise<void> {
-		if (!text.trim() || this.state.steps.requirements.status !== 'waitingInput') {
-			return;
-		}
-		this.additionalInfoHistory.push(text.trim());
-		await this.runRequirementsCheck();
-	}
-
-	async approveRequirements(): Promise<void> {
-		if (this.state.steps.requirements.status !== 'waitingApproval') {
-			return;
-		}
-		this.setStep('requirements', { status: 'completed' });
-		await this.runImplementation();
-	}
-
-	private async runRequirementsCheck(): Promise<void> {
-		if (this.checkAbortGate()) {
-			return;
-		}
-		this.setStep('requirements', { status: 'active', detail: undefined, items: undefined, error: undefined });
-		this.setBusy(true);
-		const round = this.additionalInfoHistory.length;
-		const title = round > 0 ? `Anforderungsanalyse (erneute Prüfung ${round})` : 'Anforderungsanalyse';
-		const userInput =
-			this.state.ticketText +
-			(round > 0 ? `\n\nZusätzliche Informationen des Nutzers:\n${this.additionalInfoHistory.join('\n')}` : '');
-		try {
-			const config = getConfig();
-			const additionalInfo = round
-				? `Zusätzliche Informationen des Nutzers:\n${this.additionalInfoHistory.join('\n')}`
-				: '';
-			const prompt = renderTemplate(config.prompts.requirementsCheck, {
-				ticket: this.state.ticketText,
-				additionalInfo,
-			});
-			const promptResult = await sendPrompt(config.models.requirementsCheck, prompt, this.newToken());
-			const result = extractJson<RequirementsCheckResult>(promptResult.text);
-
-			this.recordHistory({
-				step: 'requirements',
-				title,
-				userInput,
-				result: result.ready
-					? `Bereit für Implementierung. ${result.feedback}`
-					: `Weitere Informationen nötig: ${(result.missingDetails ?? []).join('; ') || result.feedback}`,
-				debug: { model: promptResult.model, prompt, rawResponse: promptResult.text },
-			});
-
-			if (result.ready) {
-				if (this.autoMode) {
-					this.setStep('requirements', { status: 'completed', detail: result.feedback, items: [] });
-					await this.runImplementation();
-				} else {
-					this.setStep('requirements', { status: 'waitingApproval', detail: result.feedback, items: [] });
-				}
-			} else {
-				this.setStep('requirements', {
-					status: 'waitingInput',
-					detail: result.feedback,
-					items: result.missingDetails ?? [],
+	/** Runs stages starting at `index`, auto-continuing (approval-gate/gate-retry permitting)
+	 *  until a stage pauses for the user, errors, gets aborted, or the chain runs off the end. */
+	private async advanceFrom(index: number): Promise<void> {
+		let i = index;
+		let totalRuns = 0;
+		while (i >= 0 && i < this.definition.stages.length) {
+			if (this.checkAbortGate()) {
+				return;
+			}
+			totalRuns++;
+			if (totalRuns > MAX_TOTAL_STAGE_RUNS) {
+				const stageId = this.definition.stages[i].id;
+				this.setStageState(stageId, {
+					status: 'error',
+					error: `Sicherheitslimit erreicht (${MAX_TOTAL_STAGE_RUNS} automatische Stufen-Durchläufe in einem Lauf) – möglicherweise verweisen zwei Gates zyklisch aufeinander. Abgebrochen.`,
 				});
+				this.setBusy(false);
+				return;
 			}
-		} catch (err) {
-			if (this.cancelledByUser) {
-				this.abortCurrentStep('requirements');
-			} else {
-				const message = err instanceof Error ? err.message : String(err);
-				this.recordHistory({ step: 'requirements', title, userInput, result: `Fehler: ${message}` });
-				this.handleStepError('requirements', err);
+			const outcome = await this.executeStage(i);
+			if (outcome.type === 'advance') {
+				i = outcome.nextIndex;
+				continue;
 			}
-		} finally {
-			this.setBusy(false);
-		}
-	}
-
-	// ---- Schritt 2: Implementierung ----------------------------------------
-
-	async requestImplementationChanges(feedback: string): Promise<void> {
-		if (this.state.steps.implementation.status !== 'waitingApproval') {
 			return;
 		}
-		this.implementationFeedback = feedback.trim();
-		this.verificationRetryCount = 0;
-		await this.runImplementation();
+		this.finishPipeline();
 	}
 
-	async approveImplementation(): Promise<void> {
-		if (this.state.steps.implementation.status !== 'waitingApproval') {
-			return;
-		}
-		await this.autoAdvanceToVerification();
+	private finishPipeline(): void {
+		this.state.phase = 'done';
+		this.emit();
 	}
 
-	private async autoAdvanceToVerification(): Promise<void> {
-		this.setStep('implementation', { status: 'completed' });
-		await this.runVerification();
+	private async executeStage(index: number): Promise<StageOutcome> {
+		const stage = this.definition.stages[index];
+		if (this.activeRetryJump && this.activeRetryJump.gateIndex === index) {
+			this.activeRetryJump = undefined;
+		}
+		switch (stage.type) {
+			case 'ai':
+				return this.executeAiStage(index, stage);
+			case 'gitPr':
+				return this.executeGitPrStage(index, stage);
+			case 'userApproval':
+				return this.executeUserApprovalStage(index, stage);
+		}
 	}
 
-	private buildImplementationFeedbackNote(): string {
-		const notes: string[] = [];
-		if (this.implementationFeedback) {
-			notes.push(`Rückmeldung des Nutzers zur vorherigen Implementierung:\n${this.implementationFeedback}`);
-		}
-		if (this.verificationFeedback) {
-			notes.push(`Ergebnis der letzten Verifizierung (bitte beheben):\n${this.verificationFeedback}`);
-		}
-		return notes.join('\n\n');
-	}
+	// ---- Stage-Typ: ai ---------------------------------------------------------
 
-	private async runImplementation(): Promise<void> {
-		if (this.checkAbortGate()) {
-			return;
+	private async executeAiStage(index: number, stage: AiStageDefinition): Promise<StageOutcome> {
+		// Every round's note (manual or gate-injected) stays in the list — a later round still
+		// sees what was said in earlier ones, not just the latest.
+		const additionalInfo = (this.pendingAdditionalInfo.get(stage.id) ?? []).join('\n\n');
+
+		let title = stage.name;
+		if (this.activeRetryJump !== undefined) {
+			const gateStage = this.definition.stages[this.activeRetryJump.gateIndex];
+			const count = this.gateRetryCounts.get(gateStage.id) ?? 0;
+			title = `${stage.name} (Korrekturversuch ${count}, ausgelöst durch "${gateStage.name}")`;
 		}
-		const root = this.getWorkspaceRoot();
-		const title =
-			this.verificationRetryCount > 0
-				? `Implementierung (Korrekturversuch ${this.verificationRetryCount})`
-				: 'Implementierung';
-		this.setStep('implementation', { status: 'active', detail: undefined, error: undefined });
+		const userInput = this.state.ticketText + (additionalInfo ? `\n\n${additionalInfo}` : '');
+
+		this.setStageState(stage.id, { status: 'active', detail: undefined, error: undefined });
 		this.setBusy(true);
 		try {
-			if (!root) {
-				throw new Error('Kein Workspace-Ordner geöffnet. Bitte öffnen Sie einen Ordner, um Code-Änderungen zu generieren.');
+			const root = this.getWorkspaceRoot();
+			if (stage.tools !== 'none' && !root) {
+				throw new Error('Kein Workspace-Ordner geöffnet. Diese Stufe benötigt Dateizugriff.');
 			}
-			const config = getConfig();
-			const token = this.newToken();
-			const workspaceContext = await gatherWorkspaceContext();
-			const additionalInfo = this.buildImplementationFeedbackNote();
-			const prompt = renderTemplate(config.prompts.implementation, {
+			const workspaceContext = stage.includeWorkspaceContext ? await gatherWorkspaceContext() : '';
+			let renderedPrompt = renderTemplate(stage.prompt, {
 				ticket: this.state.ticketText,
+				context: this.formatContextLog(),
+				lastResult: this.lastStageResultText,
+				fileChanges: this.formatCumulativeFileChanges(),
 				workspaceContext,
 				additionalInfo,
 			});
-			const userInput = this.state.ticketText + (additionalInfo ? `\n\n${additionalInfo}` : '');
-			const promptResult = await sendPromptWithTools(
-				config.models.implementation,
-				prompt,
-				createWorkspaceTools(root),
-				token
-			);
-			const result = extractJson<ImplementationResult>(promptResult.text);
+			if (stage.gate) {
+				renderedPrompt += GATE_INSTRUCTION_SUFFIX;
+			}
 
-			const fileChanges = await this.applyFileChanges(root, result.files ?? []);
-			this.state.fileChanges = fileChanges;
-			this.state.prTitle = result.summary;
-			this.state.prExplanation = result.explanation;
+			const token = this.newToken();
+			const selector = { vendor: stage.modelVendor, family: stage.modelFamily };
+			let promptResult: PromptResult;
+			let toolCalls: DebugToolCallInfo[] | undefined;
+			if (stage.tools === 'none') {
+				promptResult = await sendPrompt(selector, renderedPrompt, token);
+			} else {
+				const toolsResult = await sendPromptWithTools(
+					selector,
+					renderedPrompt,
+					createWorkspaceTools({
+						root: root as string,
+						allowWrite: stage.tools === 'readWrite',
+						onWrite: (change) => this.mergeFileChange(change),
+					}),
+					token
+				);
+				promptResult = toolsResult;
+				toolCalls = toolsResult.toolCalls;
+			}
+			this.addUsage(promptResult.usage);
 
-			const changedPaths = (result.files ?? []).map((f) => f.path);
+			let verdict: GateVerdict | undefined;
+			let proseText = promptResult.text.trim();
+			if (stage.gate) {
+				verdict = extractJson<GateVerdict>(promptResult.text);
+				const jsonStart = promptResult.text.indexOf('{');
+				proseText = jsonStart > 0 ? promptResult.text.slice(0, jsonStart).trim() : verdict.feedback ?? '';
+			}
+			this.lastStageResultText = proseText || promptResult.text.trim();
+			this.contextLog.push({ stageName: stage.name, text: this.lastStageResultText });
+
+			let historyResult = this.lastStageResultText;
+			if (stage.gate && verdict) {
+				const detailsSuffix = verdict.details.length ? ` (${verdict.details.join('; ')})` : '';
+				historyResult = `${verdict.ok ? 'OK' : 'Nicht OK'}. ${verdict.feedback}${detailsSuffix}`;
+			}
 			this.recordHistory({
-				step: 'implementation',
+				stageId: stage.id,
 				title,
 				userInput,
-				result: `${result.summary}\n${result.explanation}\nGeänderte Dateien in dieser Runde: ${
-					changedPaths.length ? changedPaths.join(', ') : '(keine)'
-				}`,
+				result: historyResult,
+				configuredModel: { vendor: stage.modelVendor, family: stage.modelFamily },
+				model: promptResult.model,
 				debug: {
 					model: promptResult.model,
-					prompt,
-					toolCalls: promptResult.toolCalls,
+					prompt: renderedPrompt,
+					toolCalls,
 					rawResponse: promptResult.text,
 				},
 			});
 
-			if (this.autoMode) {
-				this.setStep('implementation', {
-					status: 'completed',
-					detail: result.explanation,
-					items: fileChanges.map((f) => f.path),
-				});
-				await this.runVerification();
-			} else {
-				this.setStep('implementation', {
-					status: 'waitingApproval',
-					detail: result.explanation,
-					items: fileChanges.map((f) => f.path),
-				});
+			if (stage.gate && verdict && !verdict.ok) {
+				return this.handleGateFailure(index, stage, verdict);
 			}
+
+			const detail = stage.gate ? verdict?.feedback : this.lastStageResultText;
+			const items = verdict?.details ?? [];
+			const suppressApproval = this.autoMode || this.activeRetryJump !== undefined;
+			if (stage.requireApproval && !suppressApproval) {
+				this.setStageState(stage.id, { status: 'waitingApproval', detail, items });
+				return { type: 'stop' };
+			}
+			this.setStageState(stage.id, { status: 'completed', detail, items });
+			return { type: 'advance', nextIndex: index + 1 };
 		} catch (err) {
 			if (this.cancelledByUser) {
-				this.abortCurrentStep('implementation');
+				this.abortCurrentStep(stage.id);
 			} else {
 				const message = err instanceof Error ? err.message : String(err);
 				this.recordHistory({
-					step: 'implementation',
+					stageId: stage.id,
 					title,
-					userInput: this.state.ticketText,
+					userInput,
 					result: `Fehler: ${message}`,
+					configuredModel: { vendor: stage.modelVendor, family: stage.modelFamily },
 				});
-				this.handleStepError('implementation', err);
+				this.setStageState(stage.id, { status: 'error', error: message });
 			}
+			return { type: 'stop' };
 		} finally {
 			this.setBusy(false);
 		}
 	}
 
-	/** Writes the model's file changes to disk and merges them into the cumulative
-	 *  {@link fileChangeMap} for this run, so that a later round which leaves a file
-	 *  untouched (or reports no changes at all) doesn't erase an earlier round's diff for it. */
-	private async applyFileChanges(root: string, files: ImplementationFile[]): Promise<FileChange[]> {
-		for (const file of files) {
-			const relPath = file.path.replace(/^[/\\]+/, '');
-			const absPath = resolveWorkspacePath(root, relPath);
-			const absUri = vscode.Uri.file(absPath);
-
-			const existing = this.fileChangeMap.get(relPath);
-			let originalContent: string | null;
-			if (existing) {
-				originalContent = existing.originalContent;
-			} else {
-				try {
-					const bytes = await vscode.workspace.fs.readFile(absUri);
-					originalContent = Buffer.from(bytes).toString('utf8');
-				} catch {
-					originalContent = null;
-				}
-			}
-
-			await vscode.workspace.fs.writeFile(absUri, Buffer.from(file.content, 'utf8'));
-			this.originalContentProvider.set(relPath, originalContent ?? '');
-			this.fileChangeMap.set(relPath, { path: relPath, originalContent, newContent: file.content });
+	private handleGateFailure(index: number, stage: AiStageDefinition, verdict: GateVerdict): StageOutcome {
+		const gate = stage.gate;
+		if (!gate) {
+			return { type: 'stop' };
 		}
-		return Array.from(this.fileChangeMap.values());
-	}
-
-	// ---- Schritt 3: Verifizierung ------------------------------------------
-
-	async reimplementAfterVerification(): Promise<void> {
-		if (this.state.steps.verification.status !== 'waitingInput') {
-			return;
+		if (gate.onFail.action === 'pause') {
+			this.setStageState(stage.id, { status: 'waitingInput', detail: verdict.feedback, items: verdict.details });
+			return { type: 'stop' };
 		}
-		this.verificationRetryCount = 0;
-		await this.runImplementation();
-	}
 
-	async approveForPullRequest(): Promise<void> {
-		const status = this.state.steps.verification.status;
-		if (status !== 'waitingApproval') {
-			return;
-		}
-		this.setStep('verification', { status: 'completed' });
-		await this.runPullRequest();
-	}
-
-	async forceProceedToPullRequest(): Promise<void> {
-		if (this.state.steps.verification.status !== 'waitingInput') {
-			return;
-		}
-		this.setStep('verification', {
-			status: 'completed',
-			detail: `${this.state.steps.verification.detail ?? ''} (vom Nutzer übersteuert)`.trim(),
-		});
-		await this.runPullRequest();
-	}
-
-	private async runVerification(): Promise<void> {
-		if (this.checkAbortGate()) {
-			return;
-		}
-		const title =
-			this.verificationRetryCount > 0 ? `Verifizierung (nach Korrekturversuch ${this.verificationRetryCount})` : 'Verifizierung';
-		this.setStep('verification', { status: 'active', detail: undefined, error: undefined });
-		this.setBusy(true);
-		try {
-			const config = getConfig();
-			const diff = this.state.fileChanges.map((f) => this.formatFileDiffSummary(f)).join('\n\n');
-			const prompt = renderTemplate(config.prompts.verification, {
-				ticket: this.state.ticketText,
-				implementationSummary: `${this.state.prTitle ?? ''}\n${this.state.prExplanation ?? ''}`,
-				diff,
+		const { targetStageId, maxAutoRetries } = gate.onFail;
+		const targetIndex = this.stageIndex(targetStageId);
+		if (targetIndex === -1) {
+			this.setStageState(stage.id, {
+				status: 'error',
+				error: `Ungültige Gate-Konfiguration: Ziel-Stufe "${targetStageId}" existiert nicht.`,
 			});
-			const userInput = `Ticket: ${this.state.ticketText}\n\nZu verifizierende Implementierung: ${this.state.prTitle ?? ''}\n${
-				this.state.prExplanation ?? ''
+			return { type: 'stop' };
+		}
+
+		const count = this.gateRetryCounts.get(stage.id) ?? 0;
+		if (count < maxAutoRetries) {
+			this.gateRetryCounts.set(stage.id, count + 1);
+			this.setStageState(stage.id, {
+				status: 'active',
+				detail: `${verdict.feedback} Automatischer Korrekturversuch ${count + 1}/${maxAutoRetries} über Stufe "${
+					this.definition.stages[targetIndex].name
+				}" wird gestartet.`,
+				items: verdict.details,
+			});
+			const feedbackNote = `Ergebnis der Prüfung durch "${stage.name}" (bitte beheben):\n${verdict.feedback}${
+				verdict.details.length ? `\n- ${verdict.details.join('\n- ')}` : ''
 			}`;
-			const promptResult = await sendPrompt(config.models.verification, prompt, this.newToken());
-			const result = extractJson<VerificationResult>(promptResult.text);
-
-			this.recordHistory({
-				step: 'verification',
-				title,
-				userInput,
-				result: result.passed
-					? `Bestanden. ${result.feedback}`
-					: `Abweichungen gefunden: ${(result.deviations ?? []).join('; ')}. ${result.feedback}`,
-				debug: { model: promptResult.model, prompt, rawResponse: promptResult.text },
-			});
-
-			if (result.passed) {
-				this.verificationFeedback = undefined;
-				this.verificationRetryCount = 0;
-				if (this.autoMode) {
-					this.setStep('verification', { status: 'completed', detail: result.feedback, items: [] });
-					await this.runPullRequest();
-				} else {
-					this.setStep('verification', { status: 'waitingApproval', detail: result.feedback, items: [] });
-				}
-			} else {
-				this.verificationFeedback = `${result.feedback}\n- ${(result.deviations ?? []).join('\n- ')}`;
-				const maxRetries = config.verification.maxAutoRetries;
-
-				if (this.verificationRetryCount < maxRetries) {
-					this.verificationRetryCount++;
-					this.setStep('verification', {
-						status: 'active',
-						detail: `${result.feedback} Automatischer Korrekturversuch ${this.verificationRetryCount}/${maxRetries} wird gestartet.`,
-						items: result.deviations ?? [],
-					});
-
-					await this.runImplementation();
-					if (this.state.steps.implementation.status === 'waitingApproval') {
-						await this.autoAdvanceToVerification();
-					}
-					return;
-				}
-
-				this.setStep('verification', {
-					status: 'waitingInput',
-					detail:
-						maxRetries > 0
-							? `${result.feedback} (maximale Anzahl automatischer Korrekturversuche erreicht)`
-							: result.feedback,
-					items: result.deviations ?? [],
-				});
-			}
-		} catch (err) {
-			if (this.cancelledByUser) {
-				this.abortCurrentStep('verification');
-			} else {
-				const message = err instanceof Error ? err.message : String(err);
-				this.recordHistory({
-					step: 'verification',
-					title,
-					userInput: this.state.ticketText,
-					result: `Fehler: ${message}`,
-				});
-				this.handleStepError('verification', err);
-			}
-		} finally {
-			this.setBusy(false);
+			this.addPendingInfo(targetStageId, feedbackNote);
+			this.activeRetryJump = { gateIndex: index };
+			return { type: 'advance', nextIndex: targetIndex };
 		}
+
+		this.setStageState(stage.id, {
+			status: 'waitingInput',
+			detail: maxAutoRetries > 0 ? `${verdict.feedback} (maximale Anzahl automatischer Korrekturversuche erreicht)` : verdict.feedback,
+			items: verdict.details,
+		});
+		return { type: 'stop' };
 	}
 
-	private formatFileDiffSummary(change: FileChange): string {
-		const original = change.originalContent === null ? '(neue Datei)' : truncate(change.originalContent);
-		const updated = truncate(change.newContent);
-		return `Datei: ${change.path}\n--- vorher ---\n${original}\n--- nachher ---\n${updated}`;
-	}
-
-	// ---- Schritt 4: Pull Request --------------------------------------------
-
-	private async runPullRequest(): Promise<void> {
-		if (this.checkAbortGate()) {
+	async submitAdditionalInfo(stageId: string, text: string): Promise<void> {
+		const index = this.stageIndex(stageId);
+		const stage = this.definition.stages[index];
+		if (!stage || stage.type !== 'ai' || this.getStageState(stageId)?.status !== 'waitingInput' || !text.trim()) {
 			return;
 		}
+		this.addPendingInfo(stageId, text.trim());
+		await this.advanceFrom(index);
+	}
+
+	async requestStageChanges(stageId: string, text: string): Promise<void> {
+		const index = this.stageIndex(stageId);
+		const stage = this.definition.stages[index];
+		if (!stage || stage.type !== 'ai' || this.getStageState(stageId)?.status !== 'waitingApproval' || !text.trim()) {
+			return;
+		}
+		this.addPendingInfo(stageId, text.trim());
+		await this.advanceFrom(index);
+	}
+
+	async approveStage(stageId: string): Promise<void> {
+		const index = this.stageIndex(stageId);
+		if (index === -1 || this.getStageState(stageId)?.status !== 'waitingApproval') {
+			return;
+		}
+		this.setStageState(stageId, { status: 'completed' });
+		await this.advanceFrom(index + 1);
+	}
+
+	async retryGateTarget(stageId: string): Promise<void> {
+		const index = this.stageIndex(stageId);
+		const stage = this.definition.stages[index];
+		if (!stage || stage.type !== 'ai' || !stage.gate || stage.gate.onFail.action !== 'retryStage') {
+			return;
+		}
+		if (this.getStageState(stageId)?.status !== 'waitingInput') {
+			return;
+		}
+		const targetIndex = this.stageIndex(stage.gate.onFail.targetStageId);
+		if (targetIndex === -1) {
+			return;
+		}
+		this.setStageState(stageId, { status: 'active', detail: 'Manuell erneut versucht.' });
+		await this.advanceFrom(targetIndex);
+	}
+
+	async forceGateContinue(stageId: string): Promise<void> {
+		const index = this.stageIndex(stageId);
+		const current = this.getStageState(stageId);
+		if (index === -1 || current?.status !== 'waitingInput') {
+			return;
+		}
+		this.setStageState(stageId, { status: 'completed', detail: `${current.detail ?? ''} (vom Nutzer übersteuert)`.trim() });
+		await this.advanceFrom(index + 1);
+	}
+
+	/** For a stage paused on "we need more info" (a pause-gate, e.g. the requirements check):
+	 *  stop waiting on the user and tell the next AI stage to use its own judgment on whatever
+	 *  was left open, instead of blocking on it. The ticket text and every note already given
+	 *  in earlier rounds of this stage carry forward as usual — this only skips asking for more. */
+	async proceedAutonomously(stageId: string): Promise<void> {
+		const index = this.stageIndex(stageId);
+		const stage = this.definition.stages[index];
+		const current = this.getStageState(stageId);
+		if (!stage || stage.type !== 'ai' || current?.status !== 'waitingInput') {
+			return;
+		}
+		this.setStageState(stageId, {
+			status: 'completed',
+			detail: `${current.detail ?? ''} (Nutzer: nächste Stufe soll offene Punkte selbst entscheiden)`.trim(),
+		});
+		const nextStage = this.definition.stages[index + 1];
+		if (nextStage && nextStage.type === 'ai') {
+			const openItems = current.items && current.items.length ? `\nOffene Punkte:\n- ${current.items.join('\n- ')}` : '';
+			this.addPendingInfo(
+				nextStage.id,
+				`Hinweis: Der Nutzer hat "${stage.name}" bewusst ohne weitere Angaben fortgesetzt. Bitte triff für offene bzw. unklare Punkte eigenständig eine sinnvolle Entscheidung, statt nachzufragen.${openItems}`
+			);
+		}
+		await this.advanceFrom(index + 1);
+	}
+
+	// ---- Stage-Typ: gitPr -------------------------------------------------------
+
+	private async executeGitPrStage(index: number, stage: GitPrStageDefinition): Promise<StageOutcome> {
 		const root = this.getWorkspaceRoot();
-		this.setStep('pullRequest', { status: 'active', detail: undefined, error: undefined });
+		this.setStageState(stage.id, { status: 'active', detail: undefined, error: undefined });
 		this.setBusy(true);
 		try {
 			if (!root) {
 				throw new Error('Kein Workspace-Ordner geöffnet.');
 			}
-			const config = getConfig();
 			const token = this.newToken();
 			const git = new GitService(root, toAbortSignal(token));
 
 			if (!(await git.isRepository())) {
-				this.setStep('pullRequest', {
+				this.setStageState(stage.id, {
 					status: 'skipped',
 					detail: 'Kein Git-Repository im Workspace gefunden. Die Änderungen verbleiben als lokale Dateien.',
 				});
-				await this.moveToUserVerification();
-				return;
+				return { type: 'advance', nextIndex: index + 1 };
 			}
 
 			const notes: string[] = [];
 			let branchName: string;
 			if (await git.hasCommits()) {
-				branchName = `${config.git.branchPrefix}${slugify(this.state.prTitle ?? 'aenderung')}-${Date.now()}`;
+				branchName = `${stage.branchPrefix}${slugify(this.derivePrTitle())}-${Date.now()}`;
 				await git.createAndCheckoutBranch(branchName);
 			} else {
 				branchName = await git.currentBranch();
@@ -695,31 +695,26 @@ export class PipelineController implements vscode.Disposable {
 
 			await git.stageAll();
 			if (!(await git.hasStagedChanges())) {
-				this.setStep('pullRequest', { status: 'skipped', detail: 'Keine Änderungen zum Committen gefunden.' });
-				await this.moveToUserVerification();
-				return;
+				this.setStageState(stage.id, { status: 'skipped', detail: 'Keine Änderungen zum Committen gefunden.' });
+				return { type: 'advance', nextIndex: index + 1 };
 			}
 
-			const commitMessage = `${this.state.prTitle ?? 'Thunderstorm: Automatische Änderung'}\n\n${this.state.prExplanation ?? ''}`;
-			await git.commit(commitMessage);
+			const title = this.derivePrTitle();
+			const body = this.formatContextLog() || title;
+			await git.commit(`${title}\n\n${body}`);
 			notes.push(`Commit auf Branch "${branchName}" erstellt.`);
 
-			if (!config.git.autoCreatePullRequest) {
-				this.setStep('pullRequest', {
-					status: 'skipped',
-					detail: `${notes.join(' ')} Automatische PR-Erstellung ist deaktiviert.`,
-				});
-				await this.moveToUserVerification();
-				return;
+			if (!stage.autoCreatePullRequest) {
+				this.setStageState(stage.id, { status: 'skipped', detail: `${notes.join(' ')} Automatische PR-Erstellung ist deaktiviert.` });
+				return { type: 'advance', nextIndex: index + 1 };
 			}
 
 			if (!(await git.hasRemote())) {
-				this.setStep('pullRequest', {
+				this.setStageState(stage.id, {
 					status: 'skipped',
 					detail: `${notes.join(' ')} Kein Git-Remote konfiguriert – Pull Request wird übersprungen.`,
 				});
-				await this.moveToUserVerification();
-				return;
+				return { type: 'advance', nextIndex: index + 1 };
 			}
 
 			try {
@@ -727,64 +722,58 @@ export class PipelineController implements vscode.Disposable {
 				notes.push('Branch gepusht.');
 			} catch (err) {
 				const reason = err instanceof Error ? err.message : String(err);
-				this.setStep('pullRequest', {
+				this.setStageState(stage.id, {
 					status: 'skipped',
 					detail: `${notes.join(' ')} Push fehlgeschlagen (${reason}) – Pull Request wird übersprungen. Die Änderungen verbleiben als lokaler Commit.`,
 				});
-				await this.moveToUserVerification();
-				return;
+				return { type: 'advance', nextIndex: index + 1 };
 			}
 
-			const prBody = `${this.state.prExplanation ?? ''}\n\n---\nVerifizierung: ${this.state.steps.verification.detail ?? ''}`;
-			const prResult = await git.createPullRequest(
-				this.state.prTitle ?? 'Thunderstorm: Automatische Änderung',
-				prBody,
-				config.git.baseBranch
-			);
-
+			const prResult = await git.createPullRequest(title, body, stage.baseBranch);
 			if (prResult.success) {
 				this.state.prUrl = prResult.url;
-				this.setStep('pullRequest', {
-					status: 'completed',
-					detail: `${notes.join(' ')} Pull Request erstellt: ${prResult.url}`,
-				});
+				this.setStageState(stage.id, { status: 'completed', detail: `${notes.join(' ')} Pull Request erstellt: ${prResult.url}` });
 			} else {
-				this.setStep('pullRequest', {
+				this.setStageState(stage.id, {
 					status: 'skipped',
 					detail: `${notes.join(' ')} Pull Request konnte nicht erstellt werden (${prResult.reason}). Die Änderungen verbleiben als lokaler, gepushter Commit.`,
 				});
 			}
-			await this.moveToUserVerification();
+			return { type: 'advance', nextIndex: index + 1 };
 		} catch (err) {
 			if (this.cancelledByUser) {
-				this.abortCurrentStep('pullRequest');
+				this.abortCurrentStep(stage.id);
 			} else {
-				this.handleStepError('pullRequest', err);
+				const message = err instanceof Error ? err.message : String(err);
+				this.setStageState(stage.id, { status: 'error', error: message });
 			}
+			return { type: 'stop' };
 		} finally {
 			this.setBusy(false);
 		}
 	}
 
-	// ---- Schritt 5: Nutzer-Abnahme ------------------------------------------
+	// ---- Stage-Typ: userApproval -------------------------------------------------
 
-	private async moveToUserVerification(): Promise<void> {
-		if (this.checkAbortGate()) {
-			return;
+	private async executeUserApprovalStage(index: number, stage: UserApprovalStageDefinition): Promise<StageOutcome> {
+		this.setStageState(stage.id, { status: 'waitingApproval', detail: stage.instructions });
+		if (index === this.definition.stages.length - 1) {
+			this.state.phase = 'done';
 		}
-		this.setStep('userVerification', {
-			status: 'waitingApproval',
-			detail: 'Bitte führen Sie lokale Tests aus und prüfen Sie die Änderungen manuell. Geben Sie den Vorgang anschließend frei.',
-		});
-		this.state.phase = 'done';
 		this.emit();
+		return { type: 'stop' };
 	}
 
-	async completeUserVerification(): Promise<void> {
-		if (this.state.steps.userVerification.status !== 'waitingApproval') {
+	async completeUserApproval(stageId: string): Promise<void> {
+		const index = this.stageIndex(stageId);
+		if (index === -1 || this.getStageState(stageId)?.status !== 'waitingApproval') {
 			return;
 		}
-		this.setStep('userVerification', { status: 'completed', detail: 'Vom Nutzer freigegeben.' });
+		this.setStageState(stageId, { status: 'completed', detail: 'Vom Nutzer freigegeben.' });
+		if (index === this.definition.stages.length - 1) {
+			return;
+		}
+		await this.advanceFrom(index + 1);
 	}
 
 	// ---- Sonstiges ------------------------------------------------------------
@@ -813,42 +802,45 @@ export class PipelineController implements vscode.Disposable {
 	}
 
 	async retry(): Promise<void> {
-		const erroredStep = STEP_ORDER.find((id) => this.state.steps[id].status === 'error');
-		if (!erroredStep) {
+		const errored = this.state.stages.find((s) => s.status === 'error');
+		if (!errored) {
 			return;
 		}
-		switch (erroredStep) {
-			case 'requirements':
-				await this.runRequirementsCheck();
-				return;
-			case 'implementation':
-				await this.runImplementation();
-				return;
-			case 'verification':
-				await this.runVerification();
-				return;
-			case 'pullRequest':
-				await this.runPullRequest();
-				return;
-			case 'userVerification':
-				this.setStep('userVerification', { status: 'waitingApproval' });
-				return;
+		// Retrying almost always follows a config fix (wrong model name, bad prompt, ...), so
+		// pick up the latest settings rather than blindly replaying the definition that just
+		// failed. Only swap it in if the stage shape is unchanged (same ids, same order) —
+		// otherwise indices could no longer line up with the in-progress runtime state, so we
+		// keep the original definition and let the user reset for a structural change.
+		const freshDefinition = getPipelineDefinition();
+		const sameShape =
+			freshDefinition.stages.length === this.definition.stages.length &&
+			freshDefinition.stages.every((s, i) => s.id === this.definition.stages[i].id);
+		if (sameShape) {
+			this.definition = freshDefinition;
 		}
+		const index = this.stageIndex(errored.id);
+		if (index === -1) {
+			return;
+		}
+		await this.advanceFrom(index);
 	}
 
 	reset(): void {
 		this.cts?.cancel();
 		this.cts?.dispose();
 		this.cts = undefined;
-		this.state = initialState();
-		this.additionalInfoHistory = [];
-		this.implementationFeedback = undefined;
-		this.verificationFeedback = undefined;
-		this.verificationRetryCount = 0;
+		this.definition = getPipelineDefinition();
+		this.state = initialState(this.definition);
+		this.fileChangeMap.clear();
+		this.gateRetryCounts.clear();
+		this.pendingAdditionalInfo.clear();
+		this.contextLog = [];
+		this.lastStageResultText = '';
+		this.activeRetryJump = undefined;
 		this.cancelledByUser = false;
 		this.abortAfterCurrentStep = false;
 		this.autoMode = false;
-		this.fileChangeMap.clear();
+		this.usage = { requests: 0, inputTokens: 0, outputTokens: 0 };
 		this.originalContentProvider.clear();
 		this.state.debugMode = this.debugMode;
 		this.emit();

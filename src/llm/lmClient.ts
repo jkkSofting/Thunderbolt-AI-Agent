@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { ModelSelector } from '../config';
-import { DebugToolCallInfo, ResolvedModelInfo } from '../types';
+import { DebugToolCallInfo, ResolvedModelInfo, UsageInfo } from '../types';
 
 export class LmError extends Error {}
 
@@ -19,9 +19,23 @@ function describeModel(model: vscode.LanguageModelChat): ResolvedModelInfo {
 	return { vendor: model.vendor, family: model.family, id: model.id, name: model.name };
 }
 
+/** Token counting is a best-effort estimate (used only as a relative usage gauge) and must
+ *  never abort an otherwise-successful request. */
+async function safeCountTokens(model: vscode.LanguageModelChat, text: string, token: vscode.CancellationToken): Promise<number> {
+	if (!text) {
+		return 0;
+	}
+	try {
+		return await model.countTokens(text, token);
+	} catch {
+		return 0;
+	}
+}
+
 export interface PromptResult {
 	text: string;
 	model: ResolvedModelInfo;
+	usage: UsageInfo;
 }
 
 export async function sendPrompt(
@@ -38,7 +52,11 @@ export async function sendPrompt(
 		for await (const fragment of response.text) {
 			result += fragment;
 		}
-		return { text: result, model: describeModel(model) };
+		const [inputTokens, outputTokens] = await Promise.all([
+			safeCountTokens(model, prompt, token),
+			safeCountTokens(model, result, token),
+		]);
+		return { text: result, model: describeModel(model), usage: { requests: 1, inputTokens, outputTokens } };
 	} catch (err) {
 		if (err instanceof vscode.LanguageModelError) {
 			throw new LmError(`Sprachmodell-Fehler (${err.code}): ${err.message}`);
@@ -58,14 +76,18 @@ export interface PromptWithToolsResult extends PromptResult {
 	toolCalls: DebugToolCallInfo[];
 }
 
-const MAX_TOOL_ROUNDS = 8;
+// No practical cap: the user picks the model and can abort a run at any time (immediately, or
+// after the current step) if a call spins unproductively. The one residual risk is an
+// unattended Auto-Modus run with a genuinely stuck model — nobody watching to abort — but
+// that's an accepted trade-off, not something a fixed number here could meaningfully prevent.
+const MAX_TOOL_ROUNDS = Infinity;
 
 /**
  * Like {@link sendPrompt}, but lets the model call the given tools (e.g. to read files it
  * needs) before producing its final text answer. Runs an agent loop: request → tool calls →
  * tool results fed back → request again, until the model responds with plain text or the
- * round limit is hit. The full tool-call trace is returned alongside the final text so callers
- * can surface it for debugging.
+ * round limit is hit. The full tool-call trace and per-round usage are returned alongside the
+ * final text so callers can surface them for debugging/usage tracking.
  */
 export async function sendPromptWithTools(
 	selector: ModelSelector,
@@ -81,8 +103,12 @@ export async function sendPromptWithTools(
 	}));
 	const messages: vscode.LanguageModelChatMessage[] = [vscode.LanguageModelChatMessage.User(prompt)];
 	const allToolCalls: DebugToolCallInfo[] = [];
+	let requests = 0;
+	let inputTokens = await safeCountTokens(model, prompt, token);
+	let outputTokens = 0;
 
 	for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
+		requests++;
 		let response: vscode.LanguageModelChatResponse;
 		try {
 			response = await model.sendRequest(messages, { tools: chatTools }, token);
@@ -102,9 +128,10 @@ export async function sendPromptWithTools(
 				toolCalls.push(part);
 			}
 		}
+		outputTokens += await safeCountTokens(model, text, token);
 
 		if (toolCalls.length === 0) {
-			return { text, model: describeModel(model), toolCalls: allToolCalls };
+			return { text, model: describeModel(model), toolCalls: allToolCalls, usage: { requests, inputTokens, outputTokens } };
 		}
 
 		const assistantContent: Array<vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart> = [];
@@ -115,6 +142,7 @@ export async function sendPromptWithTools(
 		messages.push(vscode.LanguageModelChatMessage.Assistant(assistantContent));
 
 		const resultParts: vscode.LanguageModelToolResultPart[] = [];
+		let roundToolResultText = '';
 		for (const call of toolCalls) {
 			const tool = tools.find((t) => t.name === call.name);
 			let resultText: string;
@@ -126,12 +154,16 @@ export async function sendPromptWithTools(
 				resultText = `Fehler beim Ausführen von "${call.name}": ${err instanceof Error ? err.message : String(err)}`;
 			}
 			allToolCalls.push({ name: call.name, input: call.input, result: resultText });
+			roundToolResultText += `${resultText}\n`;
 			resultParts.push(new vscode.LanguageModelToolResultPart(call.callId, [new vscode.LanguageModelTextPart(resultText)]));
 		}
+		inputTokens += await safeCountTokens(model, roundToolResultText, token);
 		messages.push(vscode.LanguageModelChatMessage.User(resultParts));
 	}
 
+	const writtenFiles = allToolCalls.filter((c) => c.name === 'write_file').length;
 	throw new LmError(
-		`Maximale Anzahl an Tool-Aufruf-Runden (${MAX_TOOL_ROUNDS}) erreicht, ohne dass das Modell eine finale Antwort geliefert hat.`
+		`Maximale Anzahl an Tool-Aufruf-Runden (${MAX_TOOL_ROUNDS}) erreicht, ohne dass das Modell eine finale Antwort geliefert hat ` +
+			`(${allToolCalls.length} Tool-Aufrufe insgesamt, davon ${writtenFiles}x write_file). Bereits geschriebene Dateien bleiben erhalten – über "Diff anzeigen" bzw. den Befehl "Thunderstorm: Änderungen als Diff anzeigen" einsehbar.`
 	);
 }

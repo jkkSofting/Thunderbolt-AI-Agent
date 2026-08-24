@@ -1,15 +1,24 @@
 import * as vscode from 'vscode';
 import { WORKSPACE_EXCLUDE_GLOB } from '../context/workspaceContext';
 import { resolveWorkspacePath } from '../utils/paths';
+import { FileChange } from '../types';
 import { ToolDefinition } from './lmClient';
 
 const MAX_LIST_ENTRIES = 300;
 const MAX_FILE_CHARS = 8000;
 
-/** Tools that let the implementation-step model explore and read the workspace on demand,
- *  instead of being limited to the small upfront context snapshot. */
-export function createWorkspaceTools(root: string): ToolDefinition[] {
-	return [
+export interface WorkspaceToolsOptions {
+	root: string;
+	/** Grants the write_file tool in addition to list_files/read_file. */
+	allowWrite: boolean;
+	/** Called synchronously after each successful write_file call. */
+	onWrite: (change: FileChange) => void;
+}
+
+/** Tools that let an 'ai' stage explore, read, and (if granted) write the workspace on demand,
+ *  instead of being limited to a small upfront context snapshot or a rigid output schema. */
+export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolDefinition[] {
+	const tools: ToolDefinition[] = [
 		{
 			name: 'list_files',
 			description:
@@ -46,7 +55,7 @@ export function createWorkspaceTools(root: string): ToolDefinition[] {
 					return 'Fehler: Es wurde kein "path" angegeben.';
 				}
 				try {
-					const absPath = resolveWorkspacePath(root, relPath);
+					const absPath = resolveWorkspacePath(options.root, relPath);
 					const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(absPath));
 					const text = Buffer.from(bytes).toString('utf8');
 					return text.length > MAX_FILE_CHARS
@@ -58,4 +67,46 @@ export function createWorkspaceTools(root: string): ToolDefinition[] {
 			},
 		},
 	];
+
+	if (options.allowWrite) {
+		tools.push({
+			name: 'write_file',
+			description:
+				'Schreibt eine Datei im Workspace (erstellt sie bei Bedarf, überschreibt sie sonst vollständig mit dem angegebenen Inhalt). Nutze dies für jede Datei, die neu angelegt oder geändert werden soll.',
+			inputSchema: {
+				type: 'object',
+				properties: {
+					path: { type: 'string', description: 'Workspace-relativer Dateipfad, z. B. "src/extension.ts".' },
+					content: { type: 'string', description: 'Vollständiger neuer Inhalt der Datei.' },
+				},
+				required: ['path', 'content'],
+			},
+			invoke: async (input) => {
+				const relPath = typeof input.path === 'string' ? input.path.trim() : '';
+				const content = typeof input.content === 'string' ? input.content : undefined;
+				if (!relPath || content === undefined) {
+					return 'Fehler: "path" und "content" sind erforderlich.';
+				}
+				try {
+					const absPath = resolveWorkspacePath(options.root, relPath);
+					const absUri = vscode.Uri.file(absPath);
+					let originalContent: string | null;
+					try {
+						const bytes = await vscode.workspace.fs.readFile(absUri);
+						originalContent = Buffer.from(bytes).toString('utf8');
+					} catch {
+						originalContent = null;
+					}
+					await vscode.workspace.fs.writeFile(absUri, Buffer.from(content, 'utf8'));
+					const cleanPath = relPath.replace(/^[/\\]+/, '');
+					options.onWrite({ path: cleanPath, originalContent, newContent: content });
+					return `OK: "${cleanPath}" geschrieben (${content.length} Zeichen).`;
+				} catch (err) {
+					return `Fehler beim Schreiben von "${relPath}": ${err instanceof Error ? err.message : String(err)}`;
+				}
+			},
+		});
+	}
+
+	return tools;
 }

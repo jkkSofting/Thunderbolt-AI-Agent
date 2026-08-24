@@ -71,6 +71,14 @@ button.secondary:hover {
 	background-color: var(--vscode-button-secondaryHoverBackground);
 }
 
+button.button-outline {
+	border: 1px solid var(--vscode-focusBorder, var(--vscode-button-background));
+}
+
+button.button-outline:hover {
+	border-color: var(--vscode-button-background);
+}
+
 button:disabled {
 	opacity: 0.5;
 	cursor: default;
@@ -186,6 +194,18 @@ button.danger:hover {
 	margin-bottom: 6px;
 }
 
+.history-model-line {
+	font-size: 0.78em;
+	opacity: 0.75;
+	margin-bottom: 6px;
+}
+
+.history-model-mismatch {
+	opacity: 1;
+	color: var(--vscode-notificationsWarningIcon-foreground, orange);
+	font-weight: 600;
+}
+
 .history-entry-title {
 	font-weight: 600;
 	font-size: 0.94em;
@@ -251,6 +271,17 @@ button.danger:hover {
 
 .checkbox-label input[type="checkbox"] {
 	flex-shrink: 0;
+}
+
+.usage-badge {
+	background-color: var(--vscode-textCodeBlock-background);
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 3px;
+	padding: 6px 8px;
+	font-size: 0.85em;
+	opacity: 0.85;
+	margin-bottom: 10px;
+	cursor: default;
 }
 
 .auto-mode-badge {
@@ -361,6 +392,15 @@ button.danger:hover {
 	font-weight: normal;
 }
 
+.step-type-badge {
+	font-size: 0.72em;
+	opacity: 0.7;
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 3px;
+	padding: 1px 5px;
+	white-space: nowrap;
+}
+
 .step-body {
 	padding: 2px 0 14px 0;
 	font-size: 0.94em;
@@ -424,4 +464,92 @@ button.danger:hover {
 	padding: 10px;
 	margin-top: 10px;
 	text-align: center;
+}
+
+.save-status {
+	border-radius: 3px;
+	padding: 6px 8px;
+	margin-bottom: 10px;
+	font-size: 0.9em;
+}
+
+.save-status-ok {
+	background-color: var(--vscode-inputValidation-infoBackground, var(--vscode-textCodeBlock-background));
+	border: 1px solid var(--vscode-inputValidation-infoBorder, var(--vscode-panel-border));
+}
+
+.save-status-warning {
+	background-color: var(--vscode-inputValidation-warningBackground);
+	border: 1px solid var(--vscode-inputValidation-warningBorder);
+}
+
+.save-status-error {
+	background-color: var(--vscode-inputValidation-errorBackground);
+	border: 1px solid var(--vscode-inputValidation-errorBorder);
+	color: var(--vscode-inputValidation-errorForeground, var(--vscode-foreground));
+}
+
+.stage-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin: 10px 0;
+}
+
+.stage-card {
+	background-color: var(--vscode-textCodeBlock-background);
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 3px;
+	padding: 8px 10px;
+}
+
+.stage-card-header {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	margin-bottom: 4px;
+}
+
+.stage-card-index {
+	opacity: 0.6;
+	font-size: 0.85em;
+}
+
+.stage-card-name {
+	font-weight: 600;
+	flex: 1;
+}
+
+.stage-card-type {
+	font-size: 0.72em;
+	opacity: 0.7;
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 3px;
+	padding: 1px 5px;
+	white-space: nowrap;
+}
+
+.stage-card-summary {
+	font-size: 0.85em;
+	opacity: 0.85;
+	margin-bottom: 4px;
+}
+
+.stage-card-id {
+	font-size: 0.75em;
+	opacity: 0.55;
+	font-family: var(--vscode-editor-font-family, monospace);
+	margin-bottom: 6px;
+}
+
+.json-editor {
+	width: 100%;
+	min-height: 320px;
+	font-family: var(--vscode-editor-font-family, monospace);
+	font-size: 0.85em;
+	white-space: pre;
+}
+
+.json-editor-error.collapsed {
+	display: none;
 }

@@ -2,7 +2,7 @@
   "name": "thunderstorm",
   "displayName": "Thunderstorm",
   "description": "Generiert, verifiziert und verpackt Code-Änderungen aus einer Ticket-Beschreibung als Pull Request – gesteuert über eine konfigurierbare KI-Pipeline auf Basis der VS Code Language Model API und GitHub Copilot.",
-  "version": "0.0.4",
+  "version": "0.6.1",
   "publisher": "thunderstorm-local",
   "private": true,
   "engines": {
@@ -74,74 +74,83 @@
     "configuration": {
       "title": "Thunderstorm",
       "properties": {
-        "thunderstorm.models.requirementsCheck.vendor": {
-          "type": "string",
-          "default": "copilot",
-          "description": "Anbieter (vendor) des Sprachmodells für Schritt 1 – Anforderungsanalyse."
-        },
-        "thunderstorm.models.requirementsCheck.family": {
-          "type": "string",
-          "default": "gpt-4o",
-          "description": "Modellfamilie für Schritt 1 – Anforderungsanalyse (siehe vscode.lm.selectChatModels)."
-        },
-        "thunderstorm.models.implementation.vendor": {
-          "type": "string",
-          "default": "copilot",
-          "description": "Anbieter (vendor) des Sprachmodells für Schritt 2 – Implementierung."
-        },
-        "thunderstorm.models.implementation.family": {
-          "type": "string",
-          "default": "gpt-4o",
-          "description": "Modellfamilie für Schritt 2 – Implementierung."
-        },
-        "thunderstorm.models.verification.vendor": {
-          "type": "string",
-          "default": "copilot",
-          "description": "Anbieter (vendor) des Sprachmodells für Schritt 3 – Verifizierung."
-        },
-        "thunderstorm.models.verification.family": {
-          "type": "string",
-          "default": "gpt-4o",
-          "description": "Modellfamilie für Schritt 3 – Verifizierung."
-        },
-        "thunderstorm.prompts.requirementsCheck": {
-          "type": "string",
-          "editPresentation": "multilineText",
-          "default": "Du bist ein erfahrener Software-Architekt. Bewerte die folgende Ticket-Beschreibung: Ist sie klar, eindeutig und vollständig genug, um von einem Entwickler direkt implementiert zu werden, ohne dass Rückfragen nötig sind?\n\nAntworte AUSSCHLIESSLICH mit einem JSON-Objekt ohne Markdown-Formatierung nach folgendem Schema:\n{\"ready\": boolean, \"feedback\": string, \"missingDetails\": string[]}\n\n- \"ready\": true, wenn direkt implementiert werden kann.\n- \"feedback\": kurze, für den Nutzer verständliche Begründung.\n- \"missingDetails\": Liste konkreter fehlender Informationen (leer, wenn ready true ist).\n\nTicket-Beschreibung:\n{{ticket}}\n\n{{additionalInfo}}",
-          "markdownDescription": "Prompt-Vorlage für Schritt 1 (Anforderungsanalyse). Verfügbare Platzhalter: `{{ticket}}`, `{{additionalInfo}}`."
-        },
-        "thunderstorm.prompts.implementation": {
-          "type": "string",
-          "editPresentation": "multilineText",
-          "default": "Du bist ein erfahrener Softwareentwickler. Implementiere die folgende Anforderung im aktuellen Workspace anhand des bereitgestellten Kontexts. Der Workspace-Kontext unten ist nur ein grober Überblick (Dateibaum, ggf. offene Editoren) – nutze die verfügbaren Tools (Dateien auflisten/lesen), um dir vor der Änderung den tatsächlichen Inhalt jeder relevanten Datei anzusehen, statt zu raten.\n\nAntworte am Ende AUSSCHLIESSLICH mit einem JSON-Objekt ohne Markdown-Formatierung nach folgendem Schema:\n{\"summary\": string, \"explanation\": string, \"files\": [{\"path\": string, \"content\": string}]}\n\n- \"summary\": prägnanter Ein-Zeiler, geeignet als Commit-/PR-Titel.\n- \"explanation\": verständliche Zusammenfassung, was genau geändert wurde und warum.\n- \"files\": jede betroffene Datei mit workspace-relativem Pfad und VOLLSTÄNDIGEM neuen Dateiinhalt (kein Diff, keine Auslassungen). Nur tatsächlich geänderte Dateien auflisten; ist keine Änderung nötig, ein leeres Array zurückgeben.\n\nTicket-Beschreibung:\n{{ticket}}\n\nWorkspace-Kontext:\n{{workspaceContext}}\n\n{{additionalInfo}}",
-          "markdownDescription": "Prompt-Vorlage für Schritt 2 (Implementierung). Verfügbare Platzhalter: `{{ticket}}`, `{{workspaceContext}}`, `{{additionalInfo}}`."
-        },
-        "thunderstorm.prompts.verification": {
-          "type": "string",
-          "editPresentation": "multilineText",
-          "default": "Du bist ein sorgfältiger Reviewer. Prüfe, ob die vorgenommenen Code-Änderungen die ursprüngliche Ticket-Beschreibung vollständig und korrekt umsetzen.\n\nAntworte AUSSCHLIESSLICH mit einem JSON-Objekt ohne Markdown-Formatierung nach folgendem Schema:\n{\"passed\": boolean, \"feedback\": string, \"deviations\": string[]}\n\n- \"passed\": true, wenn die Anforderungen erfüllt sind.\n- \"feedback\": kurze, für den Nutzer verständliche Begründung.\n- \"deviations\": Liste konkreter Abweichungen von den Anforderungen (leer, wenn passed true ist).\n\nUrsprüngliche Ticket-Beschreibung:\n{{ticket}}\n\nZusammenfassung der Implementierung:\n{{implementationSummary}}\n\nGeänderte Dateien:\n{{diff}}",
-          "markdownDescription": "Prompt-Vorlage für Schritt 3 (Verifizierung). Verfügbare Platzhalter: `{{ticket}}`, `{{implementationSummary}}`, `{{diff}}`."
-        },
-        "thunderstorm.git.baseBranch": {
-          "type": "string",
-          "default": "main",
-          "description": "Ziel-Branch, gegen den der Pull Request erstellt wird."
-        },
-        "thunderstorm.git.branchPrefix": {
-          "type": "string",
-          "default": "thunderstorm/",
-          "description": "Präfix für automatisch erstellte Feature-Branches."
-        },
-        "thunderstorm.git.autoCreatePullRequest": {
-          "type": "boolean",
-          "default": true,
-          "description": "Wenn aktiviert, versucht Thunderstorm nach der Verifizierung automatisch einen Pull Request über die GitHub CLI (gh) zu erstellen. Ist dies nicht möglich (z. B. fehlende Rechte, kein Remote), verbleiben die Änderungen als lokaler Commit."
-        },
-        "thunderstorm.verification.maxAutoRetries": {
-          "type": "number",
-          "default": 4,
-          "minimum": 0,
-          "description": "Anzahl automatischer Korrekturversuche: Findet Schritt 3 (Verifizierung) Abweichungen, startet Thunderstorm Schritt 2 (Implementierung) automatisch neu, bis die Anforderungen erfüllt sind oder dieses Limit erreicht ist. Bei 0 ist die Automatik deaktiviert und es erscheint sofort die manuelle Rückfrage."
+        "thunderstorm.pipeline.stages": {
+          "type": "array",
+          "markdownDescription": "Die Stufenkette, die Thunderstorm bei jedem Lauf ausführt – eine JSON-Liste beliebiger Länge, in Reihenfolge abgearbeitet. Bearbeitbar hier oder über den Verlauf-/Pipeline-Editor in der Sidebar (beide schreiben/lesen dieselbe Einstellung).\n\nJede Stufe hat ein `type`-Feld:\n- `ai`: KI-Aufruf mit `id`, `name`, `modelVendor`, `modelFamily`, `prompt` (Platzhalter: `{{ticket}}` `{{context}}` `{{lastResult}}` `{{fileChanges}}` `{{workspaceContext}}` `{{additionalInfo}}`), `tools` (`none`/`read`/`readWrite`), `includeWorkspaceContext`, `requireApproval`, optional `gate` mit `onFail: {action:'pause'}` oder `{action:'retryStage', targetStageId, maxAutoRetries}`.\n- `gitPr`: erstellt Branch/Commit/PR (`id`, `name`, `baseBranch`, `branchPrefix`, `autoCreatePullRequest`).\n- `userApproval`: manuelles Gate (`id`, `name`, `instructions`).\n\n`id`-Werte müssen innerhalb der Liste eindeutig sein (Ziel für `retryStage`).",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": { "type": "string", "enum": ["ai", "gitPr", "userApproval"] },
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "modelVendor": { "type": "string" },
+              "modelFamily": { "type": "string" },
+              "prompt": { "type": "string" },
+              "tools": { "type": "string", "enum": ["none", "read", "readWrite"] },
+              "includeWorkspaceContext": { "type": "boolean" },
+              "requireApproval": { "type": "boolean" },
+              "gate": { "type": "object" },
+              "baseBranch": { "type": "string" },
+              "branchPrefix": { "type": "string" },
+              "autoCreatePullRequest": { "type": "boolean" },
+              "instructions": { "type": "string" }
+            },
+            "required": ["type", "id", "name"]
+          },
+          "default": [
+            {
+              "id": "requirements",
+              "type": "ai",
+              "name": "Anforderungsanalyse",
+              "modelVendor": "copilot",
+              "modelFamily": "gpt-4o",
+              "tools": "none",
+              "includeWorkspaceContext": false,
+              "requireApproval": true,
+              "gate": { "mode": "boolean", "onFail": { "action": "pause" } },
+              "prompt": "Du bist ein erfahrener Software-Architekt. Bewerte die folgende Ticket-Beschreibung: Ist sie klar, eindeutig und vollständig genug, um von einem Entwickler direkt implementiert zu werden, ohne dass Rückfragen nötig sind?\n\nTicket-Beschreibung:\n{{ticket}}\n\n{{additionalInfo}}"
+            },
+            {
+              "id": "implementation",
+              "type": "ai",
+              "name": "Implementierung",
+              "modelVendor": "copilot",
+              "modelFamily": "gpt-4o",
+              "tools": "readWrite",
+              "includeWorkspaceContext": true,
+              "requireApproval": true,
+              "prompt": "Du bist ein erfahrener Softwareentwickler. Implementiere die folgende Anforderung im aktuellen Workspace. Nutze die verfügbaren Tools (Dateien auflisten/lesen/schreiben), um dir vor jeder Änderung den tatsächlichen Inhalt der betroffenen Dateien anzusehen und deine Änderungen direkt zu schreiben. Fasse am Ende in Prosa zusammen, was du geändert hast und warum.\n\nTicket-Beschreibung:\n{{ticket}}\n\nWorkspace-Kontext:\n{{workspaceContext}}\n\nBisheriger Kontext:\n{{context}}\n\n{{additionalInfo}}"
+            },
+            {
+              "id": "verification",
+              "type": "ai",
+              "name": "Verifizierung",
+              "modelVendor": "copilot",
+              "modelFamily": "gpt-4o",
+              "tools": "none",
+              "includeWorkspaceContext": false,
+              "requireApproval": true,
+              "gate": {
+                "mode": "boolean",
+                "onFail": { "action": "retryStage", "targetStageId": "implementation", "maxAutoRetries": 2 }
+              },
+              "prompt": "Du bist ein sorgfältiger Reviewer. Prüfe, ob die vorgenommenen Code-Änderungen die ursprüngliche Ticket-Beschreibung vollständig und korrekt umsetzen.\n\nUrsprüngliche Ticket-Beschreibung:\n{{ticket}}\n\nBisherige Implementierung:\n{{lastResult}}\n\nGeänderte Dateien:\n{{fileChanges}}"
+            },
+            {
+              "id": "pullRequest",
+              "type": "gitPr",
+              "name": "Pull Request",
+              "baseBranch": "main",
+              "branchPrefix": "thunderstorm/",
+              "autoCreatePullRequest": true
+            },
+            {
+              "id": "userVerification",
+              "type": "userApproval",
+              "name": "Nutzer-Abnahme",
+              "instructions": "Bitte führen Sie lokale Tests aus und prüfen Sie die Änderungen manuell. Geben Sie den Vorgang anschließend frei."
+            }
+          ]
         }
       }
     }
