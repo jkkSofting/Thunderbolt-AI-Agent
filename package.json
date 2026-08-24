@@ -1,0 +1,144 @@
+{
+  "name": "thunderstorm",
+  "displayName": "Thunderstorm",
+  "description": "Generiert, verifiziert und verpackt Code-Änderungen aus einer Ticket-Beschreibung als Pull Request – gesteuert über eine konfigurierbare KI-Pipeline auf Basis der VS Code Language Model API und GitHub Copilot.",
+  "version": "0.0.1",
+  "publisher": "thunderstorm-local",
+  "private": true,
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Other",
+    "Machine Learning"
+  ],
+  "keywords": [
+    "copilot",
+    "language model",
+    "pull request",
+    "automation",
+    "pipeline"
+  ],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "thunderstorm",
+          "title": "Thunderstorm",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "thunderstorm": [
+        {
+          "id": "thunderstorm.sidebar",
+          "name": "Pipeline",
+          "type": "webview",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "thunderstorm.focus",
+        "title": "Thunderstorm: Sidebar öffnen"
+      },
+      {
+        "command": "thunderstorm.reset",
+        "title": "Thunderstorm: Pipeline zurücksetzen"
+      },
+      {
+        "command": "thunderstorm.showDiff",
+        "title": "Thunderstorm: Änderungen als Diff anzeigen"
+      }
+    ],
+    "configuration": {
+      "title": "Thunderstorm",
+      "properties": {
+        "thunderstorm.models.requirementsCheck.vendor": {
+          "type": "string",
+          "default": "copilot",
+          "description": "Anbieter (vendor) des Sprachmodells für Schritt 1 – Anforderungsanalyse."
+        },
+        "thunderstorm.models.requirementsCheck.family": {
+          "type": "string",
+          "default": "gpt-4o",
+          "description": "Modellfamilie für Schritt 1 – Anforderungsanalyse (siehe vscode.lm.selectChatModels)."
+        },
+        "thunderstorm.models.implementation.vendor": {
+          "type": "string",
+          "default": "copilot",
+          "description": "Anbieter (vendor) des Sprachmodells für Schritt 2 – Implementierung."
+        },
+        "thunderstorm.models.implementation.family": {
+          "type": "string",
+          "default": "gpt-4o",
+          "description": "Modellfamilie für Schritt 2 – Implementierung."
+        },
+        "thunderstorm.models.verification.vendor": {
+          "type": "string",
+          "default": "copilot",
+          "description": "Anbieter (vendor) des Sprachmodells für Schritt 3 – Verifizierung."
+        },
+        "thunderstorm.models.verification.family": {
+          "type": "string",
+          "default": "gpt-4o",
+          "description": "Modellfamilie für Schritt 3 – Verifizierung."
+        },
+        "thunderstorm.prompts.requirementsCheck": {
+          "type": "string",
+          "editPresentation": "multilineText",
+          "default": "Du bist ein erfahrener Software-Architekt. Bewerte die folgende Ticket-Beschreibung: Ist sie klar, eindeutig und vollständig genug, um von einem Entwickler direkt implementiert zu werden, ohne dass Rückfragen nötig sind?\n\nAntworte AUSSCHLIESSLICH mit einem JSON-Objekt ohne Markdown-Formatierung nach folgendem Schema:\n{\"ready\": boolean, \"feedback\": string, \"missingDetails\": string[]}\n\n- \"ready\": true, wenn direkt implementiert werden kann.\n- \"feedback\": kurze, für den Nutzer verständliche Begründung.\n- \"missingDetails\": Liste konkreter fehlender Informationen (leer, wenn ready true ist).\n\nTicket-Beschreibung:\n{{ticket}}\n\n{{additionalInfo}}",
+          "markdownDescription": "Prompt-Vorlage für Schritt 1 (Anforderungsanalyse). Verfügbare Platzhalter: `{{ticket}}`, `{{additionalInfo}}`."
+        },
+        "thunderstorm.prompts.implementation": {
+          "type": "string",
+          "editPresentation": "multilineText",
+          "default": "Du bist ein erfahrener Softwareentwickler. Implementiere die folgende Anforderung im aktuellen Workspace anhand des bereitgestellten Kontexts.\n\nAntworte AUSSCHLIESSLICH mit einem JSON-Objekt ohne Markdown-Formatierung nach folgendem Schema:\n{\"summary\": string, \"explanation\": string, \"files\": [{\"path\": string, \"content\": string}]}\n\n- \"summary\": prägnanter Ein-Zeiler, geeignet als Commit-/PR-Titel.\n- \"explanation\": verständliche Zusammenfassung, was genau geändert wurde und warum.\n- \"files\": jede betroffene Datei mit workspace-relativem Pfad und VOLLSTÄNDIGEM neuen Dateiinhalt (kein Diff, keine Auslassungen).\n\nTicket-Beschreibung:\n{{ticket}}\n\nWorkspace-Kontext:\n{{workspaceContext}}\n\n{{additionalInfo}}",
+          "markdownDescription": "Prompt-Vorlage für Schritt 2 (Implementierung). Verfügbare Platzhalter: `{{ticket}}`, `{{workspaceContext}}`, `{{additionalInfo}}`."
+        },
+        "thunderstorm.prompts.verification": {
+          "type": "string",
+          "editPresentation": "multilineText",
+          "default": "Du bist ein sorgfältiger Reviewer. Prüfe, ob die vorgenommenen Code-Änderungen die ursprüngliche Ticket-Beschreibung vollständig und korrekt umsetzen.\n\nAntworte AUSSCHLIESSLICH mit einem JSON-Objekt ohne Markdown-Formatierung nach folgendem Schema:\n{\"passed\": boolean, \"feedback\": string, \"deviations\": string[]}\n\n- \"passed\": true, wenn die Anforderungen erfüllt sind.\n- \"feedback\": kurze, für den Nutzer verständliche Begründung.\n- \"deviations\": Liste konkreter Abweichungen von den Anforderungen (leer, wenn passed true ist).\n\nUrsprüngliche Ticket-Beschreibung:\n{{ticket}}\n\nZusammenfassung der Implementierung:\n{{implementationSummary}}\n\nGeänderte Dateien:\n{{diff}}",
+          "markdownDescription": "Prompt-Vorlage für Schritt 3 (Verifizierung). Verfügbare Platzhalter: `{{ticket}}`, `{{implementationSummary}}`, `{{diff}}`."
+        },
+        "thunderstorm.git.baseBranch": {
+          "type": "string",
+          "default": "main",
+          "description": "Ziel-Branch, gegen den der Pull Request erstellt wird."
+        },
+        "thunderstorm.git.branchPrefix": {
+          "type": "string",
+          "default": "thunderstorm/",
+          "description": "Präfix für automatisch erstellte Feature-Branches."
+        },
+        "thunderstorm.git.autoCreatePullRequest": {
+          "type": "boolean",
+          "default": true,
+          "description": "Wenn aktiviert, versucht Thunderstorm nach der Verifizierung automatisch einen Pull Request über die GitHub CLI (gh) zu erstellen. Ist dies nicht möglich (z. B. fehlende Rechte, kein Remote), verbleiben die Änderungen als lokaler Commit."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && npm run lint && node esbuild.js",
+    "watch": "node esbuild.js --watch",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src",
+    "package": "npm run check-types && npm run lint && node esbuild.js --production"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.95.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "esbuild": "^0.23.0",
+    "eslint": "^8.57.0",
+    "typescript": "^5.5.4"
+  }
+}
