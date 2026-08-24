@@ -1,0 +1,20 @@
+{
+  "thunderstorm.models.requirementsCheck.vendor": "copilot",
+  "thunderstorm.models.requirementsCheck.family": "gpt-4o",
+
+  "thunderstorm.models.implementation.vendor": "copilot",
+  "thunderstorm.models.implementation.family": "gpt-4o",
+
+  "thunderstorm.models.verification.vendor": "copilot",
+  "thunderstorm.models.verification.family": "gpt-4o",
+
+  "thunderstorm.prompts.requirementsCheck": "Du bist ein erfahrener Software-Architekt. Bewerte die folgende Ticket-Beschreibung: Ist sie klar, eindeutig und vollständig genug, um von einem Entwickler direkt implementiert zu werden, ohne dass Rückfragen nötig sind?\n\nAntworte AUSSCHLIESSLICH mit einem JSON-Objekt ohne Markdown-Formatierung nach folgendem Schema:\n{\"ready\": boolean, \"feedback\": string, \"missingDetails\": string[]}\n\n- \"ready\": true, wenn direkt implementiert werden kann.\n- \"feedback\": kurze, für den Nutzer verständliche Begründung.\n- \"missingDetails\": Liste konkreter fehlender Informationen (leer, wenn ready true ist).\n\nTicket-Beschreibung:\n{{ticket}}\n\n{{additionalInfo}}",
+
+  "thunderstorm.prompts.implementation": "Du bist ein erfahrener Softwareentwickler. Implementiere die folgende Anforderung im aktuellen Workspace anhand des bereitgestellten Kontexts.\n\nAntworte AUSSCHLIESSLICH mit einem JSON-Objekt ohne Markdown-Formatierung nach folgendem Schema:\n{\"summary\": string, \"explanation\": string, \"files\": [{\"path\": string, \"content\": string}]}\n\n- \"summary\": prägnanter Ein-Zeiler, geeignet als Commit-/PR-Titel.\n- \"explanation\": verständliche Zusammenfassung, was genau geändert wurde und warum.\n- \"files\": jede betroffene Datei mit workspace-relativem Pfad und VOLLSTÄNDIGEM neuen Dateiinhalt (kein Diff, keine Auslassungen).\n\nTicket-Beschreibung:\n{{ticket}}\n\nWorkspace-Kontext:\n{{workspaceContext}}\n\n{{additionalInfo}}",
+
+  "thunderstorm.prompts.verification": "Du bist ein sorgfältiger Reviewer. Prüfe, ob die vorgenommenen Code-Änderungen die ursprüngliche Ticket-Beschreibung vollständig und korrekt umsetzen.\n\nAntworte AUSSCHLIESSLICH mit einem JSON-Objekt ohne Markdown-Formatierung nach folgendem Schema:\n{\"passed\": boolean, \"feedback\": string, \"deviations\": string[]}\n\n- \"passed\": true, wenn die Anforderungen erfüllt sind.\n- \"feedback\": kurze, für den Nutzer verständliche Begründung.\n- \"deviations\": Liste konkreter Abweichungen von den Anforderungen (leer, wenn passed true ist).\n\nUrsprüngliche Ticket-Beschreibung:\n{{ticket}}\n\nZusammenfassung der Implementierung:\n{{implementationSummary}}\n\nGeänderte Dateien:\n{{diff}}",
+
+  "thunderstorm.git.baseBranch": "main",
+  "thunderstorm.git.branchPrefix": "thunderstorm/",
+  "thunderstorm.git.autoCreatePullRequest": true
+}

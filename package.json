@@ -53,6 +53,10 @@
       {
         "command": "thunderstorm.showDiff",
         "title": "Thunderstorm: Änderungen als Diff anzeigen"
+      },
+      {
+        "command": "thunderstorm.listModels",
+        "title": "Thunderstorm: Verfügbare Sprachmodelle anzeigen"
       }
     ],
     "configuration": {
