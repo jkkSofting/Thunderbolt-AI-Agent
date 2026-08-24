@@ -68,6 +68,10 @@ export interface StageRuntimeState {
 	detail?: string;
 	items?: string[];
 	error?: string;
+	/** Cumulative usage across every round this stage has run so far in the current pipeline
+	 *  run (a stage can run more than once via retries/gate corrections). Undefined until it
+	 *  has made at least one LM call. */
+	usage?: UsageInfo;
 }
 
 export interface FileChange {
@@ -133,6 +137,8 @@ export interface HistoryEntry {
 	/** The model that actually answered — always recorded (unlike `debug`, which is only kept
 	 *  when Debug-Modus was on), so a "wrong model used" question can always be checked. */
 	model?: ResolvedModelInfo;
+	/** This one call's own usage (not cumulative) — always recorded, same reasoning as `model`. */
+	usage?: UsageInfo;
 	debug?: DebugInfo;
 }
 

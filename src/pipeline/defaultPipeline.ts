@@ -28,7 +28,7 @@ export const DEFAULT_PIPELINE: PipelineDefinition = {
 			includeWorkspaceContext: true,
 			requireApproval: true,
 			prompt:
-				'Du bist ein erfahrener Softwareentwickler. Implementiere die folgende Anforderung im aktuellen Workspace. Nutze die verfügbaren Tools (Dateien auflisten/lesen/schreiben), um dir vor jeder Änderung den tatsächlichen Inhalt der betroffenen Dateien anzusehen und deine Änderungen direkt zu schreiben. Fasse am Ende in Prosa zusammen, was du geändert hast und warum.\n\nTicket-Beschreibung:\n{{ticket}}\n\nWorkspace-Kontext:\n{{workspaceContext}}\n\nBisheriger Kontext:\n{{context}}\n\n{{additionalInfo}}',
+				'Du bist ein erfahrener Softwareentwickler. Implementiere die folgende Anforderung im aktuellen Workspace. Nutze die verfügbaren Tools (Dateien auflisten/lesen/schreiben), um dir vor jeder Änderung den tatsächlichen Inhalt der betroffenen Dateien anzusehen. WICHTIG: Jede Code-Änderung MUSS über das write_file-Tool tatsächlich geschrieben werden – eine Änderung nur in deiner Antwort zu beschreiben oder anzukündigen reicht nicht, sie wird sonst nicht angewendet. Das gilt auch, wenn du nur eine bereits vorgeschlagene Korrektur nachträglich anpasst. Fasse am Ende in Prosa zusammen, was du tatsächlich geschrieben hast und warum.\n\nTicket-Beschreibung:\n{{ticket}}\n\nWorkspace-Kontext:\n{{workspaceContext}}\n\nBisheriger Kontext:\n{{context}}\n\n{{additionalInfo}}',
 		},
 		{
 			id: 'verification',

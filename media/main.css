@@ -442,6 +442,12 @@ button.danger:hover {
 	font-size: 0.85em;
 }
 
+.stage-usage-line {
+	font-size: 0.78em;
+	opacity: 0.65;
+	margin-bottom: 6px;
+}
+
 .footer-actions {
 	margin-top: 14px;
 	padding-top: 10px;

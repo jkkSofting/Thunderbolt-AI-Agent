@@ -190,6 +190,21 @@
 			);
 			return container;
 		}
+
+		const total = sumUsage(historyEntries.map((e) => e.usage).filter(Boolean));
+		if (total.requests > 0) {
+			container.appendChild(
+				el(
+					'div',
+					{
+						class: 'usage-badge',
+						title: 'Summe über alle Verlauf-Einträge (auch über mehrere Durchläufe hinweg, bis VS Code neu gestartet wird). Anfragen = echte Copilot-Anfragen, Tokens = grobe Schätzung.',
+					},
+					`Gesamt: ${formatUsageText(total)} (${historyEntries.length} Einträge)`
+				)
+			);
+		}
+
 		const list = el('div', { class: 'history-list' });
 		const newestFirst = historyEntries.slice().reverse();
 		for (const entry of newestFirst) {
@@ -217,6 +232,10 @@
 				`Konfiguriert: ${configured} · Tatsächlich verwendet: ${actual}${mismatch ? ' ⚠ weicht ab!' : ''}`
 			);
 			card.appendChild(modelLine);
+		}
+
+		if (entry.usage && entry.usage.requests > 0) {
+			card.appendChild(el('div', { class: 'history-model-line' }, formatUsageText(entry.usage)));
 		}
 
 		card.appendChild(el('div', { class: 'history-field-label' }, 'Eingabe'));
@@ -301,6 +320,22 @@
 
 	function formatCount(n) {
 		return (n || 0).toLocaleString('de-DE');
+	}
+
+	function formatUsageText(usage) {
+		const totalTokens = (usage.inputTokens || 0) + (usage.outputTokens || 0);
+		return `${formatCount(usage.requests)} Anfrage${usage.requests === 1 ? '' : 'n'} · ~${formatCount(totalTokens)} Tokens geschätzt`;
+	}
+
+	function sumUsage(list) {
+		return list.reduce(
+			(acc, u) => ({
+				requests: acc.requests + (u.requests || 0),
+				inputTokens: acc.inputTokens + (u.inputTokens || 0),
+				outputTokens: acc.outputTokens + (u.outputTokens || 0),
+			}),
+			{ requests: 0, inputTokens: 0, outputTokens: 0 }
+		);
 	}
 
 	function renderUsageBadge(usage) {
@@ -437,6 +472,19 @@
 
 		if (stage.status === 'active') {
 			frag.appendChild(el('div', { class: 'busy-indicator' }, 'Wird verarbeitet …'));
+		}
+
+		if (stage.usage && stage.usage.requests > 0) {
+			frag.appendChild(
+				el(
+					'div',
+					{
+						class: 'stage-usage-line',
+						title: 'Anfragen = echte Copilot-Anfragen. Tokens = grobe Schätzung, keine offizielle Abrechnungsgröße.',
+					},
+					formatUsageText(stage.usage)
+				)
+			);
 		}
 
 		if (stage.type === 'ai') {

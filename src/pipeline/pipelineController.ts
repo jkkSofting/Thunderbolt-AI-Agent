@@ -81,6 +81,16 @@ function truncate(text: string, max = 3000): string {
 	return text.length > max ? `${text.slice(0, max)}\n… (gekürzt)` : text;
 }
 
+const EMPTY_USAGE: UsageInfo = { requests: 0, inputTokens: 0, outputTokens: 0 };
+
+function sumUsage(a: UsageInfo, b: UsageInfo): UsageInfo {
+	return {
+		requests: a.requests + b.requests,
+		inputTokens: a.inputTokens + b.inputTokens,
+		outputTokens: a.outputTokens + b.outputTokens,
+	};
+}
+
 export class PipelineController implements vscode.Disposable {
 	private definition: PipelineDefinition = DEFAULT_PIPELINE;
 	private state: PipelineState = initialState(this.definition);
@@ -146,15 +156,15 @@ export class PipelineController implements vscode.Disposable {
 		this.outputChannel.show();
 	}
 
-	/** Adds one LM call's usage to the running total for this pipeline run. `requests` is the
-	 *  real, billable unit (one Copilot chat request); the token counts are an estimate. */
-	private addUsage(usage: UsageInfo): void {
-		this.usage = {
-			requests: this.usage.requests + usage.requests,
-			inputTokens: this.usage.inputTokens + usage.inputTokens,
-			outputTokens: this.usage.outputTokens + usage.outputTokens,
-		};
+	/** Adds one LM call's usage to the pipeline-wide total AND to that stage's own cumulative
+	 *  total (a stage can run more than once via retries). `requests` is the real, billable
+	 *  unit (one Copilot chat request); the token counts are an estimate. */
+	private addUsage(stageId: StageId, usage: UsageInfo): void {
+		this.usage = sumUsage(this.usage, usage);
 		this.state.usage = this.usage;
+		this.state.stages = this.state.stages.map((s) =>
+			s.id === stageId ? { ...s, usage: sumUsage(s.usage ?? EMPTY_USAGE, usage) } : s
+		);
 		this.emit();
 	}
 
@@ -169,6 +179,7 @@ export class PipelineController implements vscode.Disposable {
 		result: string;
 		configuredModel?: { vendor: string; family: string };
 		model?: ResolvedModelInfo;
+		usage?: UsageInfo;
 		debug?: DebugInfo;
 	}): void {
 		const full: HistoryEntry = {
@@ -180,6 +191,7 @@ export class PipelineController implements vscode.Disposable {
 			result: entry.result,
 			configuredModel: entry.configuredModel,
 			model: entry.model,
+			usage: entry.usage,
 			debug: this.debugMode ? entry.debug : undefined,
 		};
 		this.history.push(full);
@@ -468,7 +480,17 @@ export class PipelineController implements vscode.Disposable {
 				promptResult = toolsResult;
 				toolCalls = toolsResult.toolCalls;
 			}
-			this.addUsage(promptResult.usage);
+			this.addUsage(stage.id, promptResult.usage);
+
+			// If a stage has write access but made zero write_file calls, its final text may
+			// just be *describing* a change it never actually applied. Surface that explicitly
+			// in what gets carried forward, instead of leaving the next stage (e.g. the
+			// verifier) to silently work off a diff that doesn't match the prose.
+			const writeFileCalls = (toolCalls ?? []).filter((c) => c.name === 'write_file').length;
+			const noWritesWarning =
+				stage.tools === 'readWrite' && writeFileCalls === 0
+					? '\n\n[Hinweis: Diese Runde hat keine Datei über das write_file-Tool geschrieben. Eine hier beschriebene Änderung wurde also nicht tatsächlich angewendet.]'
+					: '';
 
 			let verdict: GateVerdict | undefined;
 			let proseText = promptResult.text.trim();
@@ -477,7 +499,7 @@ export class PipelineController implements vscode.Disposable {
 				const jsonStart = promptResult.text.indexOf('{');
 				proseText = jsonStart > 0 ? promptResult.text.slice(0, jsonStart).trim() : verdict.feedback ?? '';
 			}
-			this.lastStageResultText = proseText || promptResult.text.trim();
+			this.lastStageResultText = (proseText || promptResult.text.trim()) + noWritesWarning;
 			this.contextLog.push({ stageName: stage.name, text: this.lastStageResultText });
 
 			let historyResult = this.lastStageResultText;
@@ -492,6 +514,7 @@ export class PipelineController implements vscode.Disposable {
 				result: historyResult,
 				configuredModel: { vendor: stage.modelVendor, family: stage.modelFamily },
 				model: promptResult.model,
+				usage: promptResult.usage,
 				debug: {
 					model: promptResult.model,
 					prompt: renderedPrompt,
