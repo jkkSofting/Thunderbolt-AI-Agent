@@ -1,0 +1,535 @@
+:root {
+	--ts-space-1: 4px;
+	--ts-space-2: 8px;
+	--ts-space-3: 12px;
+	--ts-space-4: 16px;
+	--ts-space-5: 20px;
+	--ts-radius-sm: 4px;
+	--ts-radius-md: 6px;
+	--ts-border: var(--vscode-panel-border, var(--vscode-widget-border));
+	--ts-muted: var(--vscode-descriptionForeground, var(--vscode-foreground));
+	--ts-surface: var(--vscode-textCodeBlock-background, var(--vscode-editor-background));
+}
+
+html {
+	overflow-x: hidden;
+}
+
+body {
+	padding: 16px 14px 24px;
+	line-height: 1.45;
+}
+
+#app,
+#app > * {
+	min-width: 0;
+}
+
+h1,
+h2,
+h3 {
+	line-height: 1.25;
+	letter-spacing: -0.01em;
+}
+
+h1 {
+	font-size: 1.15em;
+}
+
+h2 {
+	font-size: 1.05em;
+	margin-bottom: 10px;
+}
+
+h3 {
+	font-size: 0.98em;
+	margin-bottom: 8px;
+}
+
+p {
+	line-height: 1.5;
+}
+
+button,
+input,
+select,
+textarea {
+	font: inherit;
+}
+
+button {
+	min-height: 30px;
+	padding: 7px 12px;
+	border-radius: var(--ts-radius-sm);
+	transition: background-color 100ms ease, border-color 100ms ease, opacity 100ms ease;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+	outline: 1px solid var(--vscode-focusBorder);
+	outline-offset: 2px;
+}
+
+button.link {
+	min-height: 24px;
+	padding: 3px 0;
+}
+
+button.button-outline {
+	background: transparent;
+}
+
+input:not([type='checkbox']):not([type='radio']),
+select {
+	width: 100%;
+	min-height: 30px;
+	padding: 6px 9px;
+	color: var(--vscode-input-foreground);
+	background-color: var(--vscode-input-background);
+	border: 1px solid var(--vscode-input-border, var(--ts-border));
+	border-radius: var(--ts-radius-sm);
+}
+
+input:not([type='checkbox']):not([type='radio']):hover,
+select:hover,
+textarea:hover {
+	border-color: var(--vscode-inputOption-activeBorder, var(--vscode-focusBorder));
+}
+
+textarea {
+	min-height: 104px;
+	padding: 9px 10px;
+	line-height: 1.45;
+	border-radius: var(--ts-radius-sm);
+}
+
+input[type='checkbox'],
+input[type='radio'] {
+	accent-color: var(--vscode-focusBorder);
+}
+
+.field-label {
+	margin: 14px 0 6px;
+	font-size: 0.86em;
+	font-weight: 600;
+	line-height: 1.3;
+	color: var(--ts-muted);
+}
+
+.actions {
+	align-items: center;
+	gap: 8px;
+	margin-top: 14px;
+}
+
+.checkbox-label {
+	gap: 8px;
+	line-height: 1.35;
+}
+
+/* Keep the product header visible while the sidebar content scrolls. */
+.global-top-bar {
+	position: sticky;
+	top: 0;
+	z-index: 10;
+	margin: -16px -14px 20px;
+	padding: 14px 14px 10px;
+	background-color: var(--vscode-sideBar-background);
+	border-bottom: 1px solid var(--ts-border);
+}
+
+.global-title-row {
+	align-items: center;
+	gap: 8px 10px;
+	margin-bottom: 10px;
+	flex-wrap: wrap;
+}
+
+.global-title-row h1 {
+	min-width: 105px;
+}
+
+.debug-toggle {
+	white-space: nowrap;
+}
+
+.view-tabs {
+	gap: 2px;
+	max-width: 100%;
+	overflow-x: auto;
+	padding-bottom: 1px;
+}
+
+.tab-btn {
+	min-height: 30px;
+	padding: 6px 10px;
+	border-radius: var(--ts-radius-sm) var(--ts-radius-sm) 0 0;
+	white-space: nowrap;
+}
+
+/* Shared surfaces make the three views feel like one consistent interface. */
+.usage-badge,
+.auto-mode-badge,
+.ticket-preview,
+.history-entry,
+.abort-bar,
+.error-box,
+.warning-box,
+.info-box,
+.approval-box {
+	border: 1px solid var(--ts-border);
+	border-radius: var(--ts-radius-md);
+}
+
+.usage-badge,
+.auto-mode-badge {
+	padding: 9px 11px;
+	margin-bottom: 14px;
+	line-height: 1.4;
+}
+
+.ticket-preview {
+	padding: 11px 12px;
+	margin-bottom: 16px;
+	line-height: 1.5;
+}
+
+.abort-bar {
+	gap: 8px;
+	margin-bottom: 18px;
+	padding: 10px 12px;
+	background-color: var(--ts-surface);
+}
+
+.abort-note {
+	line-height: 1.4;
+}
+
+.history-list {
+	gap: 12px;
+}
+
+.history-entry {
+	padding: 13px 14px;
+	background-color: var(--ts-surface);
+}
+
+.history-entry:hover {
+	border-color: var(--vscode-focusBorder);
+}
+
+.history-entry-header {
+	align-items: flex-start;
+	gap: 10px;
+	margin-bottom: 10px;
+}
+
+.history-entry-title {
+	min-width: 0;
+	line-height: 1.35;
+	overflow-wrap: anywhere;
+}
+
+.history-entry-time {
+	line-height: 1.35;
+}
+
+.history-model-line {
+	margin-bottom: 9px;
+	line-height: 1.35;
+}
+
+.history-field-label {
+	margin-top: 11px;
+	line-height: 1.25;
+}
+
+.history-field-value {
+	line-height: 1.45;
+	overflow-wrap: anywhere;
+}
+
+.history-debug-box {
+	margin-top: 12px;
+	padding-top: 11px;
+}
+
+.history-pre {
+	margin-top: 6px;
+	padding: 9px 10px;
+	line-height: 1.4;
+}
+
+.history-exchange-box {
+	margin: 0 0 12px;
+	padding: 10px 11px;
+	background-color: var(--vscode-editor-background);
+	border: 1px solid var(--ts-border);
+	border-left: 3px solid var(--vscode-charts-blue, var(--vscode-focusBorder));
+	border-radius: var(--ts-radius-sm);
+}
+
+.history-exchange-label {
+	margin-bottom: 5px;
+	line-height: 1.4;
+}
+
+.history-exchange-side {
+	padding: 10px 0 0;
+	border-top: 1px solid var(--ts-border);
+}
+
+.history-exchange-side + .history-exchange-side {
+	margin-top: 10px;
+}
+
+/* Pipeline timeline */
+.stepper {
+	margin-top: 2px;
+	border-left-width: 1px;
+}
+
+.step {
+	padding-bottom: 9px;
+}
+
+.step-header {
+	gap: 9px;
+	min-height: 36px;
+	padding: 8px 8px 8px 0;
+	border-radius: var(--ts-radius-sm);
+	transition: background-color 100ms ease;
+}
+
+.step-header:hover {
+	background-color: var(--vscode-list-hoverBackground);
+}
+
+.step-marker {
+	top: 10px;
+	left: -10px;
+	width: 18px;
+	height: 18px;
+	font-size: 10px;
+}
+
+.step-title {
+	min-width: 0;
+	line-height: 1.35;
+	overflow-wrap: anywhere;
+}
+
+.step-status-label {
+	max-width: 42%;
+	line-height: 1.3;
+	text-align: right;
+}
+
+.step-type-badge {
+	padding: 2px 7px;
+	border-radius: 10px;
+	line-height: 1.25;
+	background-color: var(--vscode-badge-background);
+	color: var(--vscode-badge-foreground);
+}
+
+.step-body {
+	padding: 5px 8px 17px 0;
+	line-height: 1.5;
+}
+
+.detail-text {
+	margin-bottom: 9px;
+}
+
+.item-list {
+	margin-top: 6px;
+	margin-bottom: 11px;
+}
+
+.item-list li {
+	margin-bottom: 4px;
+	line-height: 1.45;
+}
+
+/* Common result, approval and change panels used by pipeline stages. */
+.file-changes,
+.file-change-list,
+.change-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	margin: 10px 0 12px;
+}
+
+.file-change,
+.change-item,
+.file-change-item {
+	min-width: 0;
+	padding: 9px 10px;
+	background-color: var(--ts-surface);
+	border: 1px solid var(--ts-border);
+	border-radius: var(--ts-radius-sm);
+}
+
+.file-change,
+.change-item,
+.file-change-item,
+.file-change code {
+	overflow-wrap: anywhere;
+}
+
+pre,
+.code-block,
+.diff-content {
+	max-width: 100%;
+	overflow: auto;
+	line-height: 1.4;
+}
+
+pre {
+	padding: 10px 11px;
+	background-color: var(--vscode-editor-background);
+	border: 1px solid var(--ts-border);
+	border-radius: var(--ts-radius-sm);
+}
+
+.error-box,
+.warning-box,
+.info-box,
+.approval-box {
+	margin: 10px 0 14px;
+	padding: 11px 12px;
+	line-height: 1.45;
+	background-color: var(--ts-surface);
+}
+
+.error-box {
+	border-left: 3px solid var(--vscode-errorForeground);
+}
+
+.warning-box {
+	border-left: 3px solid var(--vscode-notificationsWarningIcon-foreground, orange);
+}
+
+.info-box {
+	border-left: 3px solid var(--vscode-focusBorder);
+}
+
+.approval-box {
+	border-left: 3px solid var(--vscode-charts-green, var(--vscode-testing-iconPassed, #2ea043));
+}
+
+/* Configuration/editor view. The selectors also keep custom pipeline definitions
+ * readable if the editor gains another field in the future. */
+.stage-list,
+.stages-list,
+.stage-editor-list,
+.pipeline-stage-list,
+.editor-list {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.stage-card,
+.stage-editor-card,
+.pipeline-stage-card,
+.editor-card {
+	min-width: 0;
+	padding: 12px;
+	background-color: var(--ts-surface);
+	border: 1px solid var(--ts-border);
+	border-radius: var(--ts-radius-md);
+}
+
+.stage-card-header,
+.stage-editor-header,
+.pipeline-stage-header,
+.editor-card-header {
+	display: flex;
+	align-items: flex-start;
+	gap: 8px;
+	min-width: 0;
+	margin-bottom: 10px;
+}
+
+.stage-card-header > :first-child,
+.stage-editor-header > :first-child,
+.pipeline-stage-header > :first-child,
+.editor-card-header > :first-child {
+	min-width: 0;
+	flex: 1;
+}
+
+.stage-card-actions,
+.stage-editor-actions,
+.pipeline-stage-actions,
+.editor-card-actions {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+	margin-top: 12px;
+}
+
+.stage-card textarea,
+.stage-editor-card textarea,
+.pipeline-stage-card textarea,
+.editor-card textarea {
+	min-height: 76px;
+}
+
+.save-status {
+	margin: 10px 0 0;
+	line-height: 1.4;
+}
+
+.empty-state {
+	padding: 18px 14px;
+	color: var(--ts-muted);
+	text-align: center;
+	border: 1px dashed var(--ts-border);
+	border-radius: var(--ts-radius-md);
+}
+
+hr {
+	margin: 18px 0;
+	border: 0;
+	border-top: 1px solid var(--ts-border);
+}
+
+@media (max-width: 360px) {
+	body {
+		padding-right: 10px;
+		padding-left: 10px;
+	}
+
+	.global-top-bar {
+		margin-right: -10px;
+		margin-left: -10px;
+		padding-right: 10px;
+		padding-left: 10px;
+	}
+
+	.global-title-row {
+		align-items: flex-start;
+	}
+
+	.global-title-row h1 {
+		flex-basis: 100%;
+	}
+
+	.step-status-label {
+		max-width: 34%;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	button,
+	.step-header {
+		transition: none;
+	}
+}
