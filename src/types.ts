@@ -75,6 +75,17 @@ export interface StageRuntimeState {
 	 *  run (a stage can run more than once via retries/gate corrections). Undefined until it
 	 *  has made at least one LM call. */
 	usage?: UsageInfo;
+	/** Live trace of what this stage's current round is doing (model request rounds, tool
+	 *  calls) — updated in real time while `status` is 'active', so the pipeline view isn't
+	 *  just a static "wird verarbeitet" spinner. Reset to empty at the start of each round;
+	 *  persists afterwards as a record of what that round did. */
+	activity?: StageActivityEntry[];
+}
+
+export interface StageActivityEntry {
+	id: string;
+	label: string;
+	status: 'running' | 'done' | 'error';
 }
 
 export interface FileChange {

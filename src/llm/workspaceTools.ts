@@ -38,6 +38,15 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolDefini
 				const relPaths = files.map((uri) => vscode.workspace.asRelativePath(uri, false)).sort();
 				return relPaths.length > 0 ? relPaths.join('\n') : '(keine Treffer)';
 			},
+			describeCall: (input) =>
+				`🔍 Durchsuche Workspace${typeof input.glob === 'string' && input.glob.trim() ? ` ("${input.glob.trim()}")` : ''} …`,
+			describeResult: (_input, result) => {
+				if (/^Fehler/.test(result)) {
+					return '✕ Workspace-Suche fehlgeschlagen';
+				}
+				const count = result === '(keine Treffer)' ? 0 : result.split('\n').length;
+				return `✓ ${count} Datei(en) gefunden`;
+			},
 		},
 		{
 			name: 'read_file',
@@ -64,6 +73,13 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolDefini
 				} catch (err) {
 					return `Datei "${relPath}" konnte nicht gelesen werden: ${err instanceof Error ? err.message : String(err)}`;
 				}
+			},
+			describeCall: (input) => `📖 Lese Datei „${typeof input.path === 'string' ? input.path : '?'}“ …`,
+			describeResult: (input, result) => {
+				const p = typeof input.path === 'string' ? input.path : '?';
+				return /konnte nicht gelesen werden/.test(result)
+					? `✕ „${p}“ konnte nicht gelesen werden`
+					: `✓ „${p}“ gelesen (${result.length.toLocaleString('de-DE')} Zeichen)`;
 			},
 		},
 	];
@@ -104,6 +120,11 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolDefini
 				} catch (err) {
 					return `Fehler beim Schreiben von "${relPath}": ${err instanceof Error ? err.message : String(err)}`;
 				}
+			},
+			describeCall: (input) => `✏️ Schreibe Datei „${typeof input.path === 'string' ? input.path : '?'}“ …`,
+			describeResult: (input, result) => {
+				const p = typeof input.path === 'string' ? input.path : '?';
+				return /^OK:/.test(result) ? `✓ „${p}“ geschrieben` : `✕ „${p}“ konnte nicht geschrieben werden`;
 			},
 		});
 	}

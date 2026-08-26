@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { getPipelineDefinition } from '../config';
-import { PromptResult, sendPrompt, sendPromptWithTools } from '../llm/lmClient';
+import { PromptResult, StageActivityCallback, sendPrompt, sendPromptWithTools } from '../llm/lmClient';
 import { createWorkspaceTools } from '../llm/workspaceTools';
 import { renderTemplate } from '../utils/template';
 import { parseGateVerdict } from '../utils/json';
@@ -20,6 +20,7 @@ import {
 	PipelineDefinition,
 	PipelineState,
 	ResolvedModelInfo,
+	StageActivityEntry,
 	StageId,
 	StageRuntimeState,
 	UsageInfo,
@@ -451,8 +452,23 @@ export class PipelineController implements vscode.Disposable {
 		}
 		const userInput = this.state.ticketText + (additionalInfo ? `\n\n${additionalInfo}` : '');
 
-		this.setStageState(stage.id, { status: 'active', detail: undefined, error: undefined });
+		this.setStageState(stage.id, { status: 'active', detail: undefined, error: undefined, activity: [] });
 		this.setBusy(true);
+		const activityLog: StageActivityEntry[] = [];
+		const onActivity: StageActivityCallback = (event) => {
+			if (event.type === 'start') {
+				activityLog.push({ id: event.id, label: event.label, status: 'running' });
+			} else {
+				const idx = activityLog.findIndex((a) => a.id === event.id);
+				const entry: StageActivityEntry = { id: event.id, label: event.label, status: event.ok ? 'done' : 'error' };
+				if (idx === -1) {
+					activityLog.push(entry);
+				} else {
+					activityLog[idx] = entry;
+				}
+			}
+			this.setStageState(stage.id, { activity: activityLog.slice() });
+		};
 		try {
 			const root = this.getWorkspaceRoot();
 			if (stage.tools !== 'none' && !root) {
@@ -476,8 +492,12 @@ export class PipelineController implements vscode.Disposable {
 			let promptResult: PromptResult;
 			let toolCalls: DebugToolCallInfo[] | undefined;
 			if (stage.tools === 'none') {
-				promptResult = await sendPrompt(selector, renderedPrompt, token);
+				promptResult = await sendPrompt(selector, renderedPrompt, token, onActivity);
+				this.addUsage(stage.id, promptResult.usage);
 			} else {
+				// Usage is reported live per tool-round via onUsage (so a long multi-round run
+				// shows its running Copilot-request count as it happens), so it must NOT also be
+				// added here from the final cumulative `toolsResult.usage` — that would double-count.
 				const toolsResult = await sendPromptWithTools(
 					selector,
 					renderedPrompt,
@@ -486,12 +506,13 @@ export class PipelineController implements vscode.Disposable {
 						allowWrite: stage.tools === 'readWrite',
 						onWrite: (change) => this.mergeFileChange(change),
 					}),
-					token
+					token,
+					onActivity,
+					(delta) => this.addUsage(stage.id, delta)
 				);
 				promptResult = toolsResult;
 				toolCalls = toolsResult.toolCalls;
 			}
-			this.addUsage(stage.id, promptResult.usage);
 
 			// If a stage has write access but made zero write_file calls, its final text may
 			// just be *describing* a change it never actually applied. Surface that explicitly

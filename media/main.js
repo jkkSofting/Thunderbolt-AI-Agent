@@ -505,7 +505,13 @@
 			frag.appendChild(list);
 		}
 
-		if (stage.status === 'active') {
+		if (stage.activity && stage.activity.length) {
+			const activityList = el('ul', { class: 'activity-list' });
+			for (const a of stage.activity) {
+				activityList.appendChild(el('li', { class: `activity-item activity-${a.status}` }, a.label));
+			}
+			frag.appendChild(activityList);
+		} else if (stage.status === 'active') {
 			frag.appendChild(el('div', { class: 'busy-indicator' }, 'Wird verarbeitet …'));
 		}
 
@@ -515,9 +521,10 @@
 					'div',
 					{
 						class: 'stage-usage-line',
-						title: 'Anfragen = echte Copilot-Anfragen. Tokens = grobe Schätzung, keine offizielle Abrechnungsgröße.',
+						title:
+							'Anfragen = von dieser Stufe bisher verbrauchte GitHub-Copilot-Credits (echte "Premium Requests"), live mitgezählt während die Stufe läuft. Tokens = grobe Schätzung, keine offizielle Abrechnungsgröße.',
 					},
-					formatUsageText(stage.usage)
+					`💳 ${formatUsageText(stage.usage)}`
 				)
 			);
 		}

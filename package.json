@@ -2,7 +2,7 @@
   "name": "thunderstorm",
   "displayName": "Thunderstorm",
   "description": "Generiert, verifiziert und verpackt Code-Änderungen aus einer Ticket-Beschreibung als Pull Request – gesteuert über eine konfigurierbare KI-Pipeline auf Basis der VS Code Language Model API und GitHub Copilot.",
-  "version": "0.7.0",
+  "version": "0.7.2",
   "publisher": "thunderstorm-local",
   "private": true,
   "engines": {
@@ -135,7 +135,7 @@
                 "mode": "boolean",
                 "onFail": { "action": "retryStage", "targetStageId": "implementation", "maxAutoRetries": 2 }
               },
-              "prompt": "Du bist ein sorgfältiger Reviewer. Prüfe, ob die vorgenommenen Code-Änderungen die ursprüngliche Ticket-Beschreibung vollständig und korrekt umsetzen.\n\nUrsprüngliche Ticket-Beschreibung:\n{{ticket}}\n\nBisherige Implementierung:\n{{lastResult}}\n\nGeänderte Dateien:\n{{fileChanges}}\n\n{{additionalInfo}}"
+              "prompt": "Du bist ein sorgfältiger Reviewer. Prüfe anhand des Codes – nicht durch Ausführen oder visuelles Betrachten, das kannst du nicht –, ob die vorgenommenen Code-Änderungen die ursprüngliche Ticket-Beschreibung vollständig und korrekt umsetzen.\n\nWichtig zu deinen Grenzen: Du hast keinen Zugriff auf einen Browser, kannst die Anwendung nicht ausführen und keine Screenshots erstellen oder ansehen – das kann auch die Implementierung nicht, verlange so etwas also nie. Fordere daher NIEMALS Screenshots, visuelle Vergleiche, Videos oder manuelles Ausführen der Anwendung als Voraussetzung für ok: true. Bei rein visuellen/UI-Anforderungen (Layout, Styling, Farben, Abstände, Dark Mode etc.) bewerte ausschließlich, ob der Code (CSS/Styles, Markup, Props, bedingte Logik) die Anforderung plausibel und korrekt umsetzt – wenn ja, reicht das, auch ohne visuellen Beleg.\n\nSei dagegen streng bei allem, was sich tatsächlich im Code nachprüfen lässt: Wurde jeder Teil der Anforderung umgesetzt? Gibt es Logikfehler, Widersprüche zur Anforderung, nur angekündigte statt tatsächlich geschriebene Änderungen, vergessene Dateien, Platzhalter/TODOs oder offensichtlich falsche Werte? Das bleibt weiterhin ein gültiger Grund für ok: false.\n\nUrsprüngliche Ticket-Beschreibung:\n{{ticket}}\n\nBisherige Implementierung:\n{{lastResult}}\n\nGeänderte Dateien:\n{{fileChanges}}\n\n{{additionalInfo}}"
             },
             {
               "id": "pullRequest",

@@ -596,3 +596,28 @@ button.danger:hover {
 	padding-top: 6px;
 	border-top: 1px dashed var(--vscode-panel-border);
 }
+
+.activity-list {
+	list-style: none;
+	margin: 4px 0 8px 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+}
+
+.activity-item {
+	font-size: 0.85em;
+	padding: 3px 7px;
+	border-radius: 3px;
+	background-color: var(--vscode-textCodeBlock-background);
+}
+
+.activity-item.activity-running {
+	opacity: 0.85;
+	font-style: italic;
+}
+
+.activity-item.activity-error {
+	color: var(--vscode-errorForeground);
+}
