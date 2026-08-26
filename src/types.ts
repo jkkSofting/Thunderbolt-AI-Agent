@@ -42,6 +42,9 @@ export interface UserApprovalStageDefinition {
 	type: 'userApproval';
 	name: string;
 	instructions: string;
+	/** Where "Ablehnen" (reject with a reason) sends the pipeline back to for correction. If
+	 *  unset, rejecting falls back to the stage immediately preceding this one. */
+	onReject?: { targetStageId: StageId };
 }
 
 export type StageDefinition = AiStageDefinition | GitPrStageDefinition | UserApprovalStageDefinition;
@@ -140,6 +143,10 @@ export interface HistoryEntry {
 	/** This one call's own usage (not cumulative) — always recorded, same reasoning as `model`. */
 	usage?: UsageInfo;
 	debug?: DebugInfo;
+	/** Set when this entry is a corrective re-run triggered by another stage's gate feedback
+	 *  (or a user rejection) — the id of the history entry that carried that feedback, so the
+	 *  UI can show the two sides of the exchange together instead of just adjacent-in-time. */
+	causedByEntryId?: string;
 }
 
 /** Structured verdict a gated 'ai' stage must end its answer with. */

@@ -559,3 +559,40 @@ button.danger:hover {
 .json-editor-error.collapsed {
 	display: none;
 }
+
+.confirm-row {
+	align-items: center;
+	background-color: var(--vscode-inputValidation-warningBackground, var(--vscode-editorWidget-background));
+	border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border));
+	border-radius: 3px;
+	padding: 6px 8px;
+}
+
+.confirm-text {
+	font-size: 0.88em;
+	margin-right: auto;
+}
+
+.history-entry-retry {
+	border-left: 3px solid var(--vscode-notificationsWarningIcon-foreground, orange);
+}
+
+.history-exchange-box {
+	background-color: var(--vscode-editorWidget-background, var(--vscode-textCodeBlock-background));
+	border: 1px dashed var(--vscode-notificationsWarningIcon-foreground, orange);
+	border-radius: 3px;
+	padding: 6px 8px;
+	margin-bottom: 8px;
+}
+
+.history-exchange-label {
+	font-size: 0.85em;
+	font-weight: 600;
+	margin-bottom: 4px;
+}
+
+.history-exchange-side {
+	margin-top: 6px;
+	padding-top: 6px;
+	border-top: 1px dashed var(--vscode-panel-border);
+}

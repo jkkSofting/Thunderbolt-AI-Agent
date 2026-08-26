@@ -92,6 +92,11 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 					await this.controller.completeUserApproval(message.stageId);
 				}
 				return;
+			case 'rejectUserApproval':
+				if (message.stageId) {
+					await this.controller.rejectUserApproval(message.stageId, message.text ?? '');
+				}
+				return;
 			case 'showDiff':
 				await this.controller.showDiff();
 				return;

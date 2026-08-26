@@ -71,11 +71,19 @@ function validateUserApprovalStage(raw: Record<string, unknown>, index: number):
 		console.warn(`Thunderstorm: Stufe ${index} (userApproval) ist ungültig (id/name fehlt) und wird ignoriert.`);
 		return undefined;
 	}
+	let onReject: UserApprovalStageDefinition['onReject'];
+	if (raw.onReject && typeof raw.onReject === 'object') {
+		const r = raw.onReject as Record<string, unknown>;
+		if (isNonEmptyString(r.targetStageId)) {
+			onReject = { targetStageId: r.targetStageId };
+		}
+	}
 	return {
 		id: raw.id,
 		type: 'userApproval',
 		name: raw.name,
 		instructions: isNonEmptyString(raw.instructions) ? raw.instructions : 'Bitte prüfen und freigeben.',
+		onReject,
 	};
 }
 

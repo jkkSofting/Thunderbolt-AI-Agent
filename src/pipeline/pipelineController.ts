@@ -4,7 +4,7 @@ import { getPipelineDefinition } from '../config';
 import { PromptResult, sendPrompt, sendPromptWithTools } from '../llm/lmClient';
 import { createWorkspaceTools } from '../llm/workspaceTools';
 import { renderTemplate } from '../utils/template';
-import { extractJson } from '../utils/json';
+import { parseGateVerdict } from '../utils/json';
 import { gatherWorkspaceContext } from '../context/workspaceContext';
 import { GitService } from '../git/gitService';
 import { OriginalContentProvider, THUNDERSTORM_ORIGINAL_SCHEME } from '../diff/originalContentProvider';
@@ -105,6 +105,10 @@ export class PipelineController implements vscode.Disposable {
 	/** Accumulates every round's user-supplied/auto-injected note per stage (never overwritten),
 	 *  so a second "Erneut prüfen" round still carries forward what was said in the first. */
 	private readonly pendingAdditionalInfo = new Map<StageId, string[]>();
+	/** History-entry id that produced the note currently queued in {@link pendingAdditionalInfo}
+	 *  for a stage (gate feedback or a user rejection), so the corrective run's own history entry
+	 *  can link back to it — lets the UI show both sides of the exchange together. */
+	private readonly pendingCauseEntryId = new Map<StageId, string>();
 	private contextLog: { stageName: string; text: string }[] = [];
 	private lastStageResultText = '';
 	private activeRetryJump: { gateIndex: number } | undefined;
@@ -181,7 +185,8 @@ export class PipelineController implements vscode.Disposable {
 		model?: ResolvedModelInfo;
 		usage?: UsageInfo;
 		debug?: DebugInfo;
-	}): void {
+		causedByEntryId?: string;
+	}): HistoryEntry {
 		const full: HistoryEntry = {
 			id: `h${++this.historySeq}`,
 			timestamp: Date.now(),
@@ -193,6 +198,7 @@ export class PipelineController implements vscode.Disposable {
 			model: entry.model,
 			usage: entry.usage,
 			debug: this.debugMode ? entry.debug : undefined,
+			causedByEntryId: entry.causedByEntryId,
 		};
 		this.history.push(full);
 		if (this.history.length > MAX_HISTORY_ENTRIES) {
@@ -202,6 +208,7 @@ export class PipelineController implements vscode.Disposable {
 		if (full.debug) {
 			this.writeDebugOutput(full);
 		}
+		return full;
 	}
 
 	private writeDebugOutput(entry: HistoryEntry): void {
@@ -249,10 +256,13 @@ export class PipelineController implements vscode.Disposable {
 		return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 	}
 
-	private addPendingInfo(stageId: StageId, note: string): void {
+	private addPendingInfo(stageId: StageId, note: string, causeEntryId?: string): void {
 		const list = this.pendingAdditionalInfo.get(stageId) ?? [];
 		list.push(note);
 		this.pendingAdditionalInfo.set(stageId, list);
+		if (causeEntryId) {
+			this.pendingCauseEntryId.set(stageId, causeEntryId);
+		}
 	}
 
 	private mergeFileChange(change: FileChange): void {
@@ -365,6 +375,7 @@ export class PipelineController implements vscode.Disposable {
 		this.fileChangeMap.clear();
 		this.gateRetryCounts.clear();
 		this.pendingAdditionalInfo.clear();
+		this.pendingCauseEntryId.clear();
 		this.contextLog = [];
 		this.lastStageResultText = '';
 		this.activeRetryJump = undefined;
@@ -495,7 +506,7 @@ export class PipelineController implements vscode.Disposable {
 			let verdict: GateVerdict | undefined;
 			let proseText = promptResult.text.trim();
 			if (stage.gate) {
-				verdict = extractJson<GateVerdict>(promptResult.text);
+				verdict = parseGateVerdict(promptResult.text);
 				const jsonStart = promptResult.text.indexOf('{');
 				proseText = jsonStart > 0 ? promptResult.text.slice(0, jsonStart).trim() : verdict.feedback ?? '';
 			}
@@ -507,7 +518,9 @@ export class PipelineController implements vscode.Disposable {
 				const detailsSuffix = verdict.details.length ? ` (${verdict.details.join('; ')})` : '';
 				historyResult = `${verdict.ok ? 'OK' : 'Nicht OK'}. ${verdict.feedback}${detailsSuffix}`;
 			}
-			this.recordHistory({
+			const causedByEntryId = this.pendingCauseEntryId.get(stage.id);
+			this.pendingCauseEntryId.delete(stage.id);
+			const recordedEntry = this.recordHistory({
 				stageId: stage.id,
 				title,
 				userInput,
@@ -521,10 +534,11 @@ export class PipelineController implements vscode.Disposable {
 					toolCalls,
 					rawResponse: promptResult.text,
 				},
+				causedByEntryId,
 			});
 
 			if (stage.gate && verdict && !verdict.ok) {
-				return this.handleGateFailure(index, stage, verdict);
+				return this.handleGateFailure(index, stage, verdict, recordedEntry.id);
 			}
 
 			const detail = stage.gate ? verdict?.feedback : this.lastStageResultText;
@@ -556,7 +570,7 @@ export class PipelineController implements vscode.Disposable {
 		}
 	}
 
-	private handleGateFailure(index: number, stage: AiStageDefinition, verdict: GateVerdict): StageOutcome {
+	private handleGateFailure(index: number, stage: AiStageDefinition, verdict: GateVerdict, causingEntryId: string): StageOutcome {
 		const gate = stage.gate;
 		if (!gate) {
 			return { type: 'stop' };
@@ -589,7 +603,7 @@ export class PipelineController implements vscode.Disposable {
 			const feedbackNote = `Ergebnis der Prüfung durch "${stage.name}" (bitte beheben):\n${verdict.feedback}${
 				verdict.details.length ? `\n- ${verdict.details.join('\n- ')}` : ''
 			}`;
-			this.addPendingInfo(targetStageId, feedbackNote);
+			this.addPendingInfo(targetStageId, feedbackNote, causingEntryId);
 			this.activeRetryJump = { gateIndex: index };
 			return { type: 'advance', nextIndex: targetIndex };
 		}
@@ -799,6 +813,36 @@ export class PipelineController implements vscode.Disposable {
 		await this.advanceFrom(index + 1);
 	}
 
+	/** The user found a problem during final review: send the pipeline back for correction
+	 *  instead of the only previous option (approve). Jumps to `stage.onReject.targetStageId`
+	 *  (falling back to the immediately preceding stage if unconfigured) and hands that stage
+	 *  the rejection reason the same way a failed gate hands feedback to its retry target. */
+	async rejectUserApproval(stageId: string, reason: string): Promise<void> {
+		const index = this.stageIndex(stageId);
+		const stage = this.definition.stages[index];
+		if (!stage || stage.type !== 'userApproval' || this.getStageState(stageId)?.status !== 'waitingApproval' || !reason.trim()) {
+			return;
+		}
+		const targetStageId = stage.onReject?.targetStageId ?? this.definition.stages[index - 1]?.id;
+		const targetIndex = targetStageId ? this.stageIndex(targetStageId) : -1;
+		if (targetIndex === -1) {
+			this.setStageState(stageId, {
+				status: 'error',
+				error: 'Ablehnen ist für diese Stufe nicht möglich: keine vorherige Stufe zum Zurückspringen gefunden.',
+			});
+			return;
+		}
+		this.setStageState(stageId, {
+			status: 'pending',
+			detail: `Vom Nutzer abgelehnt: ${reason.trim()}. Zurück zu "${this.definition.stages[targetIndex].name}".`,
+		});
+		this.addPendingInfo(
+			targetStageId,
+			`Der Nutzer hat die Abnahme abgelehnt mit folgender Begründung (bitte beheben):\n${reason.trim()}`
+		);
+		await this.advanceFrom(targetIndex);
+	}
+
 	// ---- Sonstiges ------------------------------------------------------------
 
 	async showDiff(): Promise<void> {
@@ -857,6 +901,7 @@ export class PipelineController implements vscode.Disposable {
 		this.fileChangeMap.clear();
 		this.gateRetryCounts.clear();
 		this.pendingAdditionalInfo.clear();
+		this.pendingCauseEntryId.clear();
 		this.contextLog = [];
 		this.lastStageResultText = '';
 		this.activeRetryJump = undefined;

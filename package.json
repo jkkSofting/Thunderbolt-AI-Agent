@@ -2,7 +2,7 @@
   "name": "thunderstorm",
   "displayName": "Thunderstorm",
   "description": "Generiert, verifiziert und verpackt Code-Änderungen aus einer Ticket-Beschreibung als Pull Request – gesteuert über eine konfigurierbare KI-Pipeline auf Basis der VS Code Language Model API und GitHub Copilot.",
-  "version": "0.6.2",
+  "version": "0.7.0",
   "publisher": "thunderstorm-local",
   "private": true,
   "engines": {
@@ -76,7 +76,7 @@
       "properties": {
         "thunderstorm.pipeline.stages": {
           "type": "array",
-          "markdownDescription": "Die Stufenkette, die Thunderstorm bei jedem Lauf ausführt – eine JSON-Liste beliebiger Länge, in Reihenfolge abgearbeitet. Bearbeitbar hier oder über den Verlauf-/Pipeline-Editor in der Sidebar (beide schreiben/lesen dieselbe Einstellung).\n\nJede Stufe hat ein `type`-Feld:\n- `ai`: KI-Aufruf mit `id`, `name`, `modelVendor`, `modelFamily`, `prompt` (Platzhalter: `{{ticket}}` `{{context}}` `{{lastResult}}` `{{fileChanges}}` `{{workspaceContext}}` `{{additionalInfo}}`), `tools` (`none`/`read`/`readWrite`), `includeWorkspaceContext`, `requireApproval`, optional `gate` mit `onFail: {action:'pause'}` oder `{action:'retryStage', targetStageId, maxAutoRetries}`.\n- `gitPr`: erstellt Branch/Commit/PR (`id`, `name`, `baseBranch`, `branchPrefix`, `autoCreatePullRequest`).\n- `userApproval`: manuelles Gate (`id`, `name`, `instructions`).\n\n`id`-Werte müssen innerhalb der Liste eindeutig sein (Ziel für `retryStage`).",
+          "markdownDescription": "Die Stufenkette, die Thunderstorm bei jedem Lauf ausführt – eine JSON-Liste beliebiger Länge, in Reihenfolge abgearbeitet. Bearbeitbar hier oder über den Verlauf-/Pipeline-Editor in der Sidebar (beide schreiben/lesen dieselbe Einstellung).\n\nJede Stufe hat ein `type`-Feld:\n- `ai`: KI-Aufruf mit `id`, `name`, `modelVendor`, `modelFamily`, `prompt` (Platzhalter: `{{ticket}}` `{{context}}` `{{lastResult}}` `{{fileChanges}}` `{{workspaceContext}}` `{{additionalInfo}}`), `tools` (`none`/`read`/`readWrite`), `includeWorkspaceContext`, `requireApproval`, optional `gate` mit `onFail: {action:'pause'}` oder `{action:'retryStage', targetStageId, maxAutoRetries}`.\n- `gitPr`: erstellt Branch/Commit/PR (`id`, `name`, `baseBranch`, `branchPrefix`, `autoCreatePullRequest`).\n- `userApproval`: manuelles Gate (`id`, `name`, `instructions`), optional `onReject: {targetStageId}` – Ziel-Stufe, an die eine Ablehnung (mit Begründung) zur Korrektur zurückgeschickt wird (Standard: die vorherige Stufe).\n\n`id`-Werte müssen innerhalb der Liste eindeutig sein (Ziel für `retryStage`/`onReject`).",
           "items": {
             "type": "object",
             "properties": {
@@ -93,7 +93,8 @@
               "baseBranch": { "type": "string" },
               "branchPrefix": { "type": "string" },
               "autoCreatePullRequest": { "type": "boolean" },
-              "instructions": { "type": "string" }
+              "instructions": { "type": "string" },
+              "onReject": { "type": "object" }
             },
             "required": ["type", "id", "name"]
           },
@@ -134,7 +135,7 @@
                 "mode": "boolean",
                 "onFail": { "action": "retryStage", "targetStageId": "implementation", "maxAutoRetries": 2 }
               },
-              "prompt": "Du bist ein sorgfältiger Reviewer. Prüfe, ob die vorgenommenen Code-Änderungen die ursprüngliche Ticket-Beschreibung vollständig und korrekt umsetzen.\n\nUrsprüngliche Ticket-Beschreibung:\n{{ticket}}\n\nBisherige Implementierung:\n{{lastResult}}\n\nGeänderte Dateien:\n{{fileChanges}}"
+              "prompt": "Du bist ein sorgfältiger Reviewer. Prüfe, ob die vorgenommenen Code-Änderungen die ursprüngliche Ticket-Beschreibung vollständig und korrekt umsetzen.\n\nUrsprüngliche Ticket-Beschreibung:\n{{ticket}}\n\nBisherige Implementierung:\n{{lastResult}}\n\nGeänderte Dateien:\n{{fileChanges}}\n\n{{additionalInfo}}"
             },
             {
               "id": "pullRequest",
@@ -148,7 +149,8 @@
               "id": "userVerification",
               "type": "userApproval",
               "name": "Nutzer-Abnahme",
-              "instructions": "Bitte führen Sie lokale Tests aus und prüfen Sie die Änderungen manuell. Geben Sie den Vorgang anschließend frei."
+              "instructions": "Bitte führen Sie lokale Tests aus und prüfen Sie die Änderungen manuell. Geben Sie den Vorgang anschließend frei.",
+              "onReject": { "targetStageId": "verification" }
             }
           ]
         }

@@ -50,6 +50,10 @@
 	let jsonEditMode = false;
 	let saveStatus = null;
 	let saveStatusTimer = null;
+	// Id of the stage currently showing an inline "really delete?" confirmation. A plain
+	// window.confirm() doesn't reliably work inside a VS Code webview (sandboxed iframe, no
+	// allow-modals), so deleting a stage used a two-step in-page confirm instead.
+	let pendingDeleteConfirm = null;
 
 	window.addEventListener('message', (event) => {
 		const message = event.data;
@@ -205,22 +209,53 @@
 			);
 		}
 
+		const byId = new Map(historyEntries.map((e) => [e.id, e]));
 		const list = el('div', { class: 'history-list' });
 		const newestFirst = historyEntries.slice().reverse();
 		for (const entry of newestFirst) {
-			list.appendChild(renderHistoryEntry(entry));
+			list.appendChild(renderHistoryEntry(entry, byId));
 		}
 		container.appendChild(list);
 		return container;
 	}
 
-	function renderHistoryEntry(entry) {
-		const card = el('div', { class: 'history-entry' });
+	function renderHistoryEntry(entry, byId) {
+		const causingEntry = entry.causedByEntryId ? byId.get(entry.causedByEntryId) : undefined;
+		const card = el('div', { class: causingEntry ? 'history-entry history-entry-retry' : 'history-entry' });
 
 		const header = el('div', { class: 'history-entry-header' });
 		header.appendChild(el('span', { class: 'history-entry-title' }, entry.title));
 		header.appendChild(el('span', { class: 'history-entry-time' }, new Date(entry.timestamp).toLocaleTimeString()));
 		card.appendChild(header);
+
+		if (causingEntry) {
+			const exchangeBox = el('div', { class: 'history-exchange-box' });
+			exchangeBox.appendChild(
+				el('div', { class: 'history-exchange-label' }, `🔁 Korrektur – ausgelöst durch Rückmeldung von „${causingEntry.title}“`)
+			);
+			const expanded = expandedHistoryEntries.has(`exchange:${entry.id}`);
+			const toggleBtn = el('button', { class: 'link' }, expanded ? 'Austausch ausblenden' : 'Austausch anzeigen (beide Seiten)');
+			toggleBtn.addEventListener('click', () => {
+				if (expanded) {
+					expandedHistoryEntries.delete(`exchange:${entry.id}`);
+				} else {
+					expandedHistoryEntries.add(`exchange:${entry.id}`);
+				}
+				render();
+			});
+			exchangeBox.appendChild(toggleBtn);
+			if (expanded) {
+				const causingBox = el('div', { class: 'history-exchange-side' });
+				causingBox.appendChild(el('div', { class: 'history-field-label' }, `${causingEntry.title} sagte`));
+				causingBox.appendChild(el('div', { class: 'history-field-value' }, causingEntry.result));
+				exchangeBox.appendChild(causingBox);
+				const responseBox = el('div', { class: 'history-exchange-side' });
+				responseBox.appendChild(el('div', { class: 'history-field-label' }, `${entry.title} antwortete`));
+				responseBox.appendChild(el('div', { class: 'history-field-value' }, entry.result));
+				exchangeBox.appendChild(responseBox);
+			}
+			card.appendChild(exchangeBox);
+		}
 
 		if (entry.configuredModel || entry.model) {
 			const configured = entry.configuredModel ? `${entry.configuredModel.vendor}/${entry.configuredModel.family}` : '?';
@@ -585,8 +620,33 @@
 		}
 		if (stage.status === 'waitingApproval') {
 			const btn = el('button', {}, 'Freigeben');
+			btn.disabled = !!state.busy;
 			btn.addEventListener('click', () => vscode.postMessage({ type: 'completeUserApproval', stageId: stage.id }));
 			wrap.appendChild(el('div', { class: 'actions' }, btn));
+
+			const def = findStageDef(stage.id);
+			const targetId = def && def.onReject ? def.onReject.targetStageId : undefined;
+			const targetName = targetId ? (findStageDef(targetId) || {}).name || targetId : undefined;
+
+			wrap.appendChild(
+				el(
+					'label',
+					{ class: 'field-label' },
+					targetName ? `Ablehnen – zurück an „${targetName}“ (Begründung erforderlich)` : 'Ablehnen (Begründung erforderlich)'
+				)
+			);
+			const textarea = el('textarea', { placeholder: 'Was passt nicht? Diese Begründung geht an die Korrektur-Stufe.' });
+			const rejectBtn = el('button', { class: 'danger' }, 'Ablehnen');
+			rejectBtn.disabled = !!state.busy;
+			rejectBtn.addEventListener('click', () => {
+				const text = textarea.value.trim();
+				if (!text) {
+					return;
+				}
+				vscode.postMessage({ type: 'rejectUserApproval', stageId: stage.id, text });
+			});
+			wrap.appendChild(textarea);
+			wrap.appendChild(el('div', { class: 'actions' }, rejectBtn));
 		}
 		return wrap;
 	}
@@ -626,7 +686,10 @@
 			}`;
 		}
 		if (stage.type === 'userApproval') {
-			return stage.instructions || '(keine Hinweise hinterlegt)';
+			const base = stage.instructions || '(keine Hinweise hinterlegt)';
+			return stage.onReject && stage.onReject.targetStageId
+				? `${base} · Ablehnen → „${stage.onReject.targetStageId}“`
+				: base;
 		}
 		return '';
 	}
@@ -767,17 +830,33 @@
 		});
 		const delBtn = el('button', { class: 'danger' }, 'Löschen');
 		delBtn.addEventListener('click', () => {
-			if (!confirm(`Stufe „${stage.name}" wirklich löschen?`)) {
-				return;
-			}
-			draftStages = draftStages.filter((_, i) => i !== index);
-			saveDraftStages();
+			pendingDeleteConfirm = stage.id;
+			render();
 		});
 		actions.appendChild(upBtn);
 		actions.appendChild(downBtn);
 		actions.appendChild(dupBtn);
 		actions.appendChild(delBtn);
 		card.appendChild(actions);
+
+		if (pendingDeleteConfirm === stage.id) {
+			const confirmRow = el('div', { class: 'actions confirm-row' });
+			confirmRow.appendChild(el('span', { class: 'confirm-text' }, `Stufe „${stage.name}" wirklich löschen?`));
+			const yesBtn = el('button', { class: 'danger' }, 'Ja, löschen');
+			yesBtn.addEventListener('click', () => {
+				pendingDeleteConfirm = null;
+				draftStages = draftStages.filter((_, i) => i !== index);
+				saveDraftStages();
+			});
+			const noBtn = el('button', { class: 'secondary' }, 'Abbrechen');
+			noBtn.addEventListener('click', () => {
+				pendingDeleteConfirm = null;
+				render();
+			});
+			confirmRow.appendChild(yesBtn);
+			confirmRow.appendChild(noBtn);
+			card.appendChild(confirmRow);
+		}
 
 		return card;
 	}

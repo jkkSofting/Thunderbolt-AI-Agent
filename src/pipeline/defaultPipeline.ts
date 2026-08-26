@@ -44,7 +44,7 @@ export const DEFAULT_PIPELINE: PipelineDefinition = {
 				onFail: { action: 'retryStage', targetStageId: 'implementation', maxAutoRetries: 2 },
 			},
 			prompt:
-				'Du bist ein sorgfältiger Reviewer. Prüfe, ob die vorgenommenen Code-Änderungen die ursprüngliche Ticket-Beschreibung vollständig und korrekt umsetzen.\n\nUrsprüngliche Ticket-Beschreibung:\n{{ticket}}\n\nBisherige Implementierung:\n{{lastResult}}\n\nGeänderte Dateien:\n{{fileChanges}}',
+				'Du bist ein sorgfältiger Reviewer. Prüfe, ob die vorgenommenen Code-Änderungen die ursprüngliche Ticket-Beschreibung vollständig und korrekt umsetzen.\n\nUrsprüngliche Ticket-Beschreibung:\n{{ticket}}\n\nBisherige Implementierung:\n{{lastResult}}\n\nGeänderte Dateien:\n{{fileChanges}}\n\n{{additionalInfo}}',
 		},
 		{
 			id: 'pullRequest',
@@ -59,6 +59,7 @@ export const DEFAULT_PIPELINE: PipelineDefinition = {
 			type: 'userApproval',
 			name: 'Nutzer-Abnahme',
 			instructions: 'Bitte führen Sie lokale Tests aus und prüfen Sie die Änderungen manuell. Geben Sie den Vorgang anschließend frei.',
+			onReject: { targetStageId: 'verification' },
 		},
 	],
 };
