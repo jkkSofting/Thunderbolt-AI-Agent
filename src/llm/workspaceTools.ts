@@ -14,7 +14,11 @@ const MAX_SYMBOL_RESULTS = 30;
 
 export interface WorkspaceToolsOptions {
 	root: string;
-	/** Grants the write_file tool in addition to list_files/read_file/search_files/find_symbol. */
+	/** Grants list_files/read_file/search_files/find_symbol to the calling model directly. A
+	 *  stage can have this off and still get a 'delegate_search' tool (see `helper`) — the model
+	 *  then explores the workspace only by asking the helper, never directly itself. */
+	allowRead: boolean;
+	/** Grants the write_file tool in addition. Only meaningful together with `allowRead`. */
 	allowWrite: boolean;
 	/** Called synchronously after each successful write_file call. */
 	onWrite: (change: FileChange) => void;
@@ -34,7 +38,10 @@ export interface WorkspaceToolsOptions {
 /** Tools that let an 'ai' stage explore, read, and (if granted) write the workspace on demand,
  *  instead of being limited to a small upfront context snapshot or a rigid output schema. */
 export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolDefinition[] {
-	const tools: ToolDefinition[] = [
+	const tools: ToolDefinition[] = [];
+
+	if (options.allowRead) {
+		tools.push(
 		{
 			name: 'list_files',
 			description:
@@ -199,14 +206,15 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolDefini
 					? `– keine Symbol-Treffer für „${q}“`
 					: `✓ ${result.split('\n').length} Symbol-Treffer für „${q}“`;
 			},
-		},
-	];
+		}
+		);
+	}
 
 	if (options.allowWrite) {
 		tools.push({
 			name: 'write_file',
 			description:
-				'Schreibt eine Datei im Workspace (erstellt sie bei Bedarf, überschreibt sie sonst vollständig mit dem angegebenen Inhalt). Nutze dies für jede Datei, die neu angelegt oder geändert werden soll.',
+				'Erstellt eine neue Datei ODER überschreibt eine bestehende Datei VOLLSTÄNDIG mit dem angegebenen Inhalt. Für gezielte Änderungen an einer bereits bestehenden Datei bevorzuge stattdessen replace_in_file – dort musst du nicht die ganze Datei abschreiben, was schneller und weniger fehleranfällig ist (kein Risiko, versehentlich Teile der Datei wegzulassen). Nutze write_file für neue Dateien oder wenn eine Datei wirklich komplett ersetzt werden soll.',
 			inputSchema: {
 				type: 'object',
 				properties: {
@@ -245,6 +253,71 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolDefini
 				return /^OK:/.test(result) ? `✓ „${p}“ geschrieben` : `✕ „${p}“ konnte nicht geschrieben werden`;
 			},
 		});
+
+		tools.push({
+			name: 'replace_in_file',
+			description:
+				'Ersetzt einen exakten, zusammenhängenden Textabschnitt in einer bestehenden Datei durch neuen Text, OHNE die ganze Datei neu schreiben zu müssen. Bevorzuge dies gegenüber write_file für Änderungen an bestehenden Dateien – du gibst nur die betroffene Stelle an, nicht die gesamte Datei. Der "search"-Text muss zeichengenau (inkl. Einrückung und Zeilenumbrüchen) aus dem aktuellen Dateiinhalt kopiert sein und darf in der Datei nur GENAU EINMAL vorkommen – sonst schlägt der Aufruf mit einer Fehlermeldung fehl (zu wenig oder zu viel Kontext im "search"-Text). Lies die Datei bei Bedarf vorher mit read_file, um den exakten aktuellen Inhalt zu kennen.',
+			inputSchema: {
+				type: 'object',
+				properties: {
+					path: { type: 'string', description: 'Workspace-relativer Dateipfad, z. B. "src/extension.ts".' },
+					search: {
+						type: 'string',
+						description:
+							'Exakter, zusammenhängender Textabschnitt aus der aktuellen Datei, der ersetzt werden soll. Muss genau einmal in der Datei vorkommen.',
+					},
+					replace: { type: 'string', description: 'Der neue Text, der an dieser Stelle stehen soll.' },
+				},
+				required: ['path', 'search', 'replace'],
+			},
+			invoke: async (input) => {
+				const relPath = typeof input.path === 'string' ? input.path.trim() : '';
+				const search = typeof input.search === 'string' ? input.search : undefined;
+				const replace = typeof input.replace === 'string' ? input.replace : undefined;
+				if (!relPath || !search || replace === undefined) {
+					return 'Fehler: "path" und "search" (nicht leer) sowie "replace" sind erforderlich.';
+				}
+				try {
+					const absPath = resolveWorkspacePath(options.root, relPath);
+					const absUri = vscode.Uri.file(absPath);
+					let originalContent: string;
+					try {
+						const bytes = await vscode.workspace.fs.readFile(absUri);
+						originalContent = Buffer.from(bytes).toString('utf8');
+					} catch (err) {
+						return `Datei "${relPath}" konnte nicht gelesen werden: ${err instanceof Error ? err.message : String(err)}`;
+					}
+					const firstIndex = originalContent.indexOf(search);
+					if (firstIndex === -1) {
+						return `Fehler: Der angegebene "search"-Text wurde in "${relPath}" nicht gefunden (muss zeichengenau übereinstimmen, inkl. Einrückung/Zeilenumbrüche). Lies die Datei erneut, um den exakten aktuellen Inhalt zu prüfen.`;
+					}
+					const secondIndex = originalContent.indexOf(search, firstIndex + search.length);
+					if (secondIndex !== -1) {
+						return `Fehler: Der angegebene "search"-Text kommt in "${relPath}" mehrfach vor. Füge mehr umgebenden Kontext hinzu, damit die Stelle eindeutig ist.`;
+					}
+					const newContent = originalContent.slice(0, firstIndex) + replace + originalContent.slice(firstIndex + search.length);
+					await vscode.workspace.fs.writeFile(absUri, Buffer.from(newContent, 'utf8'));
+					const cleanPath = relPath.replace(/^[/\\]+/, '');
+					options.onWrite({ path: cleanPath, originalContent, newContent });
+					return `OK: "${cleanPath}" geändert (${search.length} → ${replace.length} Zeichen an einer Stelle).`;
+				} catch (err) {
+					return `Fehler beim Ändern von "${relPath}": ${err instanceof Error ? err.message : String(err)}`;
+				}
+			},
+			describeCall: (input) => `✂️ Ändere Ausschnitt in „${typeof input.path === 'string' ? input.path : '?'}“ …`,
+			describeResult: (input, result) => {
+				const p = typeof input.path === 'string' ? input.path : '?';
+				if (/^OK:/.test(result)) {
+					return `✓ „${p}“ gezielt geändert`;
+				}
+				return /mehrfach vor/.test(result)
+					? `✕ Stelle in „${p}“ nicht eindeutig`
+					: /nicht gefunden/.test(result)
+					? `✕ Stelle in „${p}“ nicht gefunden`
+					: `✕ Änderung an „${p}“ fehlgeschlagen`;
+			},
+		});
 	}
 
 	if (options.helper) {
@@ -276,7 +349,7 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolDefini
 									: { type: 'end', id: `delegate-${seq}-${event.id}`, label: event.label, ok: event.ok }
 							)
 					: undefined;
-				const subTools = createWorkspaceTools({ root: options.root, allowWrite: false, onWrite: () => {} });
+				const subTools = createWorkspaceTools({ root: options.root, allowRead: true, allowWrite: false, onWrite: () => {} });
 				try {
 					const result = await sendPromptWithTools(
 						helper.selector,

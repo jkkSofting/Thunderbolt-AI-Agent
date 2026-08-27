@@ -197,33 +197,43 @@ export async function sendPromptWithTools(
 		assistantContent.push(...toolCalls);
 		messages.push(vscode.LanguageModelChatMessage.Assistant(assistantContent));
 
+		// Independent tool calls within one round (e.g. the model reading three files at once)
+		// don't need to wait on each other — running them concurrently instead of one-at-a-time
+		// cuts wall-clock time for any round with more than one call, at no extra API/token cost.
+		// Order is preserved regardless of which finishes first (Promise.all keeps input order),
+		// so the result parts still line up 1:1 with `toolCalls` for the model's callIds.
+		const callOutcomes = await Promise.all(
+			toolCalls.map(async (call, callIndex) => {
+				const tool = tools.find((t) => t.name === call.name);
+				const input = call.input as Record<string, unknown>;
+				const toolActivityId = `tool-${round}-${callIndex}`;
+				onActivity?.({
+					type: 'start',
+					id: toolActivityId,
+					label: tool?.describeCall ? tool.describeCall(input) : `⚙️ Tool "${call.name}" wird ausgeführt …`,
+				});
+				let resultText: string;
+				try {
+					resultText = tool ? await tool.invoke(input) : `Unbekanntes Tool: ${call.name}`;
+				} catch (err) {
+					resultText = `Fehler beim Ausführen von "${call.name}": ${err instanceof Error ? err.message : String(err)}`;
+				}
+				const ok = !looksLikeToolFailure(resultText);
+				onActivity?.({
+					type: 'end',
+					id: toolActivityId,
+					label: tool?.describeResult
+						? tool.describeResult(input, resultText)
+						: `${ok ? '✓' : '✕'} Tool "${call.name}" ${ok ? 'abgeschlossen' : 'fehlgeschlagen'}`,
+					ok,
+				});
+				return { call, resultText };
+			})
+		);
+
 		const resultParts: vscode.LanguageModelToolResultPart[] = [];
 		let roundToolResultText = '';
-		for (let callIndex = 0; callIndex < toolCalls.length; callIndex++) {
-			const call = toolCalls[callIndex];
-			const tool = tools.find((t) => t.name === call.name);
-			const input = call.input as Record<string, unknown>;
-			const toolActivityId = `tool-${round}-${callIndex}`;
-			onActivity?.({
-				type: 'start',
-				id: toolActivityId,
-				label: tool?.describeCall ? tool.describeCall(input) : `⚙️ Tool "${call.name}" wird ausgeführt …`,
-			});
-			let resultText: string;
-			try {
-				resultText = tool ? await tool.invoke(input) : `Unbekanntes Tool: ${call.name}`;
-			} catch (err) {
-				resultText = `Fehler beim Ausführen von "${call.name}": ${err instanceof Error ? err.message : String(err)}`;
-			}
-			const ok = !looksLikeToolFailure(resultText);
-			onActivity?.({
-				type: 'end',
-				id: toolActivityId,
-				label: tool?.describeResult
-					? tool.describeResult(input, resultText)
-					: `${ok ? '✓' : '✕'} Tool "${call.name}" ${ok ? 'abgeschlossen' : 'fehlgeschlagen'}`,
-				ok,
-			});
+		for (const { call, resultText } of callOutcomes) {
 			allToolCalls.push({ name: call.name, input: call.input, result: resultText });
 			roundToolResultText += `${resultText}\n`;
 			resultParts.push(new vscode.LanguageModelToolResultPart(call.callId, [new vscode.LanguageModelTextPart(resultText)]));

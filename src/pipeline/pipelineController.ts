@@ -31,6 +31,14 @@ const MAX_HISTORY_ENTRIES = 300;
 /** Safety net against a misconfigured retry graph (e.g. two gates retrying each other)
  *  looping effectively forever and burning API calls. */
 const MAX_TOTAL_STAGE_RUNS = 100;
+/** {{context}} would otherwise accumulate every stage's full result text for the entire run —
+ *  by the 4th or 5th gate retry that's a lot of stale, increasingly irrelevant prompt bloat
+ *  (worse token cost AND worse answer quality, since irrelevant context measurably dilutes a
+ *  model's focus). Keep only the most recent rounds; {{lastResult}} already covers the latest. */
+const MAX_CONTEXT_LOG_ENTRIES = 4;
+/** Same reasoning, per stage: a stage retried many times would otherwise carry every past
+ *  round's gate feedback forever in {{additionalInfo}}. Keep only the most recent notes. */
+const MAX_PENDING_NOTES_PER_STAGE = 3;
 
 const GATE_INSTRUCTION_SUFFIX =
 	'\n\nAntworte am Ende zusätzlich mit einem eigenen JSON-Objekt auf einer neuen Zeile (kein Markdown), das dein Ergebnis bewertet:\n{"ok": boolean, "feedback": string, "details": string[]}\n- "ok": true, wenn aus deiner Sicht kein Grund besteht, diesen Schritt zu wiederholen oder auf eine Rückmeldung zu warten.\n- "feedback": kurze, für den Nutzer verständliche Begründung.\n- "details": Liste konkreter Punkte (leer, wenn ok true ist).';
@@ -80,6 +88,58 @@ function slugify(text: string): string {
 
 function truncate(text: string, max = 3000): string {
 	return text.length > max ? `${text.slice(0, max)}\n… (gekürzt)` : text;
+}
+
+/** A compact diff (common unchanged prefix/suffix trimmed away, a couple of context lines kept
+ *  around the actual change) instead of resending the full before/after file content on every
+ *  prompt. For the common case — one localized edit in an otherwise large file — this is a
+ *  fraction of the token cost of the old "vorher/nachher" dump, and it's arguably clearer for a
+ *  reviewer too since it points straight at what changed instead of making it diff two full
+ *  files by eye. Plain prefix/suffix trimming (not a full LCS diff) is intentional: it's O(n)
+ *  with no risk of the quadratic blowup a proper diff algorithm has on large files. */
+function computeCompactDiff(oldText: string, newText: string): string {
+	if (oldText === newText) {
+		return '(keine inhaltliche Änderung)';
+	}
+	const oldLines = oldText.split('\n');
+	const newLines = newText.split('\n');
+	const minLen = Math.min(oldLines.length, newLines.length);
+
+	let start = 0;
+	while (start < minLen && oldLines[start] === newLines[start]) {
+		start++;
+	}
+	let oldEnd = oldLines.length - 1;
+	let newEnd = newLines.length - 1;
+	while (oldEnd >= start && newEnd >= start && oldLines[oldEnd] === newLines[newEnd]) {
+		oldEnd--;
+		newEnd--;
+	}
+
+	const CONTEXT = 2;
+	const contextStart = Math.max(0, start - CONTEXT);
+	const contextEndOld = Math.min(oldLines.length - 1, oldEnd + CONTEXT);
+
+	const lines: string[] = [];
+	if (contextStart > 0) {
+		lines.push(`… (${contextStart} unveränderte Zeile(n) davor) …`);
+	}
+	for (let i = contextStart; i < start; i++) {
+		lines.push(`  ${oldLines[i]}`);
+	}
+	for (let i = start; i <= oldEnd; i++) {
+		lines.push(`- ${oldLines[i]}`);
+	}
+	for (let i = start; i <= newEnd; i++) {
+		lines.push(`+ ${newLines[i]}`);
+	}
+	for (let i = oldEnd + 1; i <= contextEndOld; i++) {
+		lines.push(`  ${oldLines[i]}`);
+	}
+	if (contextEndOld < oldLines.length - 1) {
+		lines.push(`… (${oldLines.length - 1 - contextEndOld} unveränderte Zeile(n) danach) …`);
+	}
+	return truncate(lines.join('\n'), 4000);
 }
 
 const EMPTY_USAGE: UsageInfo = { requests: 0, inputTokens: 0, outputTokens: 0 };
@@ -260,6 +320,9 @@ export class PipelineController implements vscode.Disposable {
 	private addPendingInfo(stageId: StageId, note: string, causeEntryId?: string): void {
 		const list = this.pendingAdditionalInfo.get(stageId) ?? [];
 		list.push(note);
+		if (list.length > MAX_PENDING_NOTES_PER_STAGE) {
+			list.splice(0, list.length - MAX_PENDING_NOTES_PER_STAGE);
+		}
 		this.pendingAdditionalInfo.set(stageId, list);
 		if (causeEntryId) {
 			this.pendingCauseEntryId.set(stageId, causeEntryId);
@@ -275,9 +338,10 @@ export class PipelineController implements vscode.Disposable {
 	}
 
 	private formatFileDiffSummary(change: FileChange): string {
-		const original = change.originalContent === null ? '(neue Datei)' : truncate(change.originalContent);
-		const updated = truncate(change.newContent);
-		return `Datei: ${change.path}\n--- vorher ---\n${original}\n--- nachher ---\n${updated}`;
+		if (change.originalContent === null) {
+			return `Datei: ${change.path} (neu)\n${truncate(change.newContent)}`;
+		}
+		return `Datei: ${change.path}\n${computeCompactDiff(change.originalContent, change.newContent)}`;
 	}
 
 	private formatCumulativeFileChanges(): string {
@@ -290,7 +354,10 @@ export class PipelineController implements vscode.Disposable {
 	}
 
 	private formatContextLog(): string {
-		return this.contextLog.map((e) => `### ${e.stageName} ###\n${e.text}`).join('\n\n');
+		return this.contextLog
+			.slice(-MAX_CONTEXT_LOG_ENTRIES)
+			.map((e) => `### ${e.stageName} ###\n${e.text}`)
+			.join('\n\n');
 	}
 
 	private derivePrTitle(): string {
@@ -469,9 +536,10 @@ export class PipelineController implements vscode.Disposable {
 			}
 			this.setStageState(stage.id, { activity: activityLog.slice() });
 		};
+		const hasHelper = !!(stage.helperModelVendor && stage.helperModelFamily);
 		try {
 			const root = this.getWorkspaceRoot();
-			if (stage.tools !== 'none' && !root) {
+			if ((stage.tools !== 'none' || hasHelper) && !root) {
 				throw new Error('Kein Workspace-Ordner geöffnet. Diese Stufe benötigt Dateizugriff.');
 			}
 			const workspaceContext = stage.includeWorkspaceContext ? await gatherWorkspaceContext() : '';
@@ -491,7 +559,7 @@ export class PipelineController implements vscode.Disposable {
 			const selector = { vendor: stage.modelVendor, family: stage.modelFamily };
 			let promptResult: PromptResult;
 			let toolCalls: DebugToolCallInfo[] | undefined;
-			if (stage.tools === 'none') {
+			if (stage.tools === 'none' && !hasHelper) {
 				promptResult = await sendPrompt(selector, renderedPrompt, token, onActivity);
 				this.addUsage(stage.id, promptResult.usage);
 			} else {
@@ -499,9 +567,9 @@ export class PipelineController implements vscode.Disposable {
 				// shows its running Copilot-request count as it happens), so it must NOT also be
 				// added here from the final cumulative `toolsResult.usage` — that would double-count.
 				let helper: { selector: { vendor: string; family: string }; token: vscode.CancellationToken; onActivity: StageActivityCallback; onUsage: (delta: UsageInfo) => void } | undefined;
-				if (stage.helperModelVendor && stage.helperModelFamily) {
+				if (hasHelper) {
 					helper = {
-						selector: { vendor: stage.helperModelVendor, family: stage.helperModelFamily },
+						selector: { vendor: stage.helperModelVendor as string, family: stage.helperModelFamily as string },
 						token,
 						onActivity,
 						onUsage: (delta) => this.addUsage(stage.id, delta),
@@ -512,6 +580,7 @@ export class PipelineController implements vscode.Disposable {
 					renderedPrompt,
 					createWorkspaceTools({
 						root: root as string,
+						allowRead: stage.tools !== 'none',
 						allowWrite: stage.tools === 'readWrite',
 						onWrite: (change) => this.mergeFileChange(change),
 						helper,
@@ -524,14 +593,14 @@ export class PipelineController implements vscode.Disposable {
 				toolCalls = toolsResult.toolCalls;
 			}
 
-			// If a stage has write access but made zero write_file calls, its final text may
-			// just be *describing* a change it never actually applied. Surface that explicitly
-			// in what gets carried forward, instead of leaving the next stage (e.g. the
-			// verifier) to silently work off a diff that doesn't match the prose.
-			const writeFileCalls = (toolCalls ?? []).filter((c) => c.name === 'write_file').length;
+			// If a stage has write access but made zero write_file/replace_in_file calls, its
+			// final text may just be *describing* a change it never actually applied. Surface
+			// that explicitly in what gets carried forward, instead of leaving the next stage
+			// (e.g. the verifier) to silently work off a diff that doesn't match the prose.
+			const writeFileCalls = (toolCalls ?? []).filter((c) => c.name === 'write_file' || c.name === 'replace_in_file').length;
 			const noWritesWarning =
 				stage.tools === 'readWrite' && writeFileCalls === 0
-					? '\n\n[Hinweis: Diese Runde hat keine Datei über das write_file-Tool geschrieben. Eine hier beschriebene Änderung wurde also nicht tatsächlich angewendet.]'
+					? '\n\n[Hinweis: Diese Runde hat keine Datei über write_file/replace_in_file geschrieben. Eine hier beschriebene Änderung wurde also nicht tatsächlich angewendet.]'
 					: '';
 
 			let verdict: GateVerdict | undefined;
@@ -624,8 +693,12 @@ export class PipelineController implements vscode.Disposable {
 		const count = this.gateRetryCounts.get(stage.id) ?? 0;
 		if (count < maxAutoRetries) {
 			this.gateRetryCounts.set(stage.id, count + 1);
+			// 'pending', not 'active' — the target stage is what actually runs next; this stage
+			// is done for this round and will only become active again once it re-runs. Marking
+			// it 'active' here made two stages show "Läuft …" at once (this one stuck, the target
+			// genuinely running).
 			this.setStageState(stage.id, {
-				status: 'active',
+				status: 'pending',
 				detail: `${verdict.feedback} Automatischer Korrekturversuch ${count + 1}/${maxAutoRetries} über Stufe "${
 					this.definition.stages[targetIndex].name
 				}" wird gestartet.`,

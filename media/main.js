@@ -55,6 +55,23 @@
 	// allow-modals), so deleting a stage used a two-step in-page confirm instead.
 	let pendingDeleteConfirm = null;
 
+	// While a stage with tool access runs, state updates can arrive many times per second (one
+	// per tool call/round via the live activity feed). Rendering rebuilds the whole #app tree
+	// (innerHTML = '' + re-append), so re-rendering on every single one of those messages made
+	// buttons (e.g. the abort controls) flicker in and out and made clicks unreliable. Coalesce
+	// bursts into at most one render per animation frame instead.
+	let renderScheduled = false;
+	function scheduleRender() {
+		if (renderScheduled) {
+			return;
+		}
+		renderScheduled = true;
+		requestAnimationFrame(() => {
+			renderScheduled = false;
+			render();
+		});
+	}
+
 	window.addEventListener('message', (event) => {
 		const message = event.data;
 		if (!message) {
@@ -62,7 +79,7 @@
 		}
 		if (message.type === 'state') {
 			state = message.state;
-			render();
+			scheduleRender();
 		} else if (message.type === 'history') {
 			historyEntries = message.entries || [];
 			render();
