@@ -48,6 +48,8 @@ function validateAiStage(raw: Record<string, unknown>, index: number): AiStageDe
 		includeWorkspaceContext: raw.includeWorkspaceContext === true,
 		requireApproval: raw.requireApproval !== false,
 		gate,
+		helperModelVendor: isNonEmptyString(raw.helperModelVendor) ? raw.helperModelVendor : undefined,
+		helperModelFamily: isNonEmptyString(raw.helperModelFamily) ? raw.helperModelFamily : undefined,
 	};
 }
 

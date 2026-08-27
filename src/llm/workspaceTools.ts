@@ -1,18 +1,34 @@
 import * as vscode from 'vscode';
 import { WORKSPACE_EXCLUDE_GLOB } from '../context/workspaceContext';
 import { resolveWorkspacePath } from '../utils/paths';
+import { ModelSelector } from '../config';
 import { FileChange } from '../types';
-import { ToolDefinition } from './lmClient';
+import { StageActivityCallback, StageActivityEvent, ToolDefinition, UsageCallback, sendPromptWithTools } from './lmClient';
 
 const MAX_LIST_ENTRIES = 300;
 const MAX_FILE_CHARS = 8000;
+const MAX_SEARCH_FILES = 400;
+const MAX_SEARCH_MATCHES = 60;
+const MAX_MATCH_LINE_CHARS = 200;
+const MAX_SYMBOL_RESULTS = 30;
 
 export interface WorkspaceToolsOptions {
 	root: string;
-	/** Grants the write_file tool in addition to list_files/read_file. */
+	/** Grants the write_file tool in addition to list_files/read_file/search_files/find_symbol. */
 	allowWrite: boolean;
 	/** Called synchronously after each successful write_file call. */
 	onWrite: (change: FileChange) => void;
+	/** If set, adds a 'delegate_search' tool that hands narrow exploratory questions (e.g. "which
+	 *  file defines the Button component?") to this cheaper/faster model instead of spending the
+	 *  stage's own model on menial lookup work. The delegate gets its own read-only tool set (no
+	 *  write access, no further delegation) and its activity/usage is reported through the same
+	 *  callbacks as the calling stage, namespaced so events don't collide with the caller's own. */
+	helper?: {
+		selector: ModelSelector;
+		token: vscode.CancellationToken;
+		onActivity?: StageActivityCallback;
+		onUsage?: UsageCallback;
+	};
 }
 
 /** Tools that let an 'ai' stage explore, read, and (if granted) write the workspace on demand,
@@ -82,6 +98,108 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolDefini
 					: `✓ „${p}“ gelesen (${result.length.toLocaleString('de-DE')} Zeichen)`;
 			},
 		},
+		{
+			name: 'search_files',
+			description:
+				'Durchsucht den INHALT aller Workspace-Dateien (nicht nur Dateinamen) nach einem Text und liefert Fundstellen als "Datei:Zeile: Inhalt" zurück. Nutze dies, um die richtige Datei/Stelle gezielt zu finden (z. B. einen Button, eine CSS-Klasse, einen Funktionsnamen), statt Dateien der Reihe nach zu raten und einzeln mit read_file zu öffnen – das spart in der Regel viele Tool-Aufrufe.',
+			inputSchema: {
+				type: 'object',
+				properties: {
+					query: { type: 'string', description: 'Suchtext (einfache Zeichenkette, Groß-/Kleinschreibung wird ignoriert).' },
+					glob: {
+						type: 'string',
+						description: 'Optionales Glob-Muster zur Eingrenzung, z. B. "**/*.{ts,tsx,css}". Standard: "**/*".',
+					},
+				},
+				required: ['query'],
+			},
+			invoke: async (input) => {
+				const query = typeof input.query === 'string' ? input.query.trim() : '';
+				if (!query) {
+					return 'Fehler: Es wurde kein "query" angegeben.';
+				}
+				const glob = typeof input.glob === 'string' && input.glob.trim() ? input.glob.trim() : '**/*';
+				const files = await vscode.workspace.findFiles(glob, WORKSPACE_EXCLUDE_GLOB, MAX_SEARCH_FILES);
+				const needle = query.toLowerCase();
+				const matches: string[] = [];
+				for (const uri of files) {
+					if (matches.length >= MAX_SEARCH_MATCHES) {
+						break;
+					}
+					let text: string;
+					try {
+						const bytes = await vscode.workspace.fs.readFile(uri);
+						text = Buffer.from(bytes).toString('utf8');
+					} catch {
+						continue;
+					}
+					if (!text.toLowerCase().includes(needle)) {
+						continue;
+					}
+					const relPath = vscode.workspace.asRelativePath(uri, false);
+					const lines = text.split('\n');
+					for (let i = 0; i < lines.length && matches.length < MAX_SEARCH_MATCHES; i++) {
+						if (lines[i].toLowerCase().includes(needle)) {
+							matches.push(`${relPath}:${i + 1}: ${lines[i].trim().slice(0, MAX_MATCH_LINE_CHARS)}`);
+						}
+					}
+				}
+				return matches.length > 0
+					? matches.join('\n')
+					: `Keine Treffer für "${query}"${glob !== '**/*' ? ` (Muster "${glob}")` : ''}.`;
+			},
+			describeCall: (input) => `🔎 Durchsuche Dateiinhalte nach „${typeof input.query === 'string' ? input.query : '?'}“ …`,
+			describeResult: (input, result) => {
+				const q = typeof input.query === 'string' ? input.query : '?';
+				return /^Keine Treffer/.test(result)
+					? `– keine Treffer für „${q}“`
+					: `✓ Treffer für „${q}“ gefunden (${result.split('\n').length} Zeile(n))`;
+			},
+		},
+		{
+			name: 'find_symbol',
+			description:
+				'Sucht Code-Symbole (Funktionen, Klassen, Komponenten, Variablen …) im Workspace über die Sprachintelligenz von VS Code – präziser als reine Textsuche, weil echte Definitionen statt nur Textvorkommen gefunden werden. Nutze dies z. B. um herauszufinden, wo eine Komponente/Funktion/Klasse definiert ist. Braucht einen aktiven Sprachserver für die jeweilige Sprache; liefert sonst keine Treffer.',
+			inputSchema: {
+				type: 'object',
+				properties: {
+					query: { type: 'string', description: 'Name oder Teil-Name des gesuchten Symbols, z. B. "Button" oder "handleSubmit".' },
+				},
+				required: ['query'],
+			},
+			invoke: async (input) => {
+				const query = typeof input.query === 'string' ? input.query.trim() : '';
+				if (!query) {
+					return 'Fehler: Es wurde kein "query" angegeben.';
+				}
+				try {
+					const symbols = await vscode.commands.executeCommand<vscode.SymbolInformation[]>(
+						'vscode.executeWorkspaceSymbolProvider',
+						query
+					);
+					if (!symbols || symbols.length === 0) {
+						return `Keine Symbole für "${query}" gefunden (evtl. ist für diese Sprache kein Sprachserver aktiv, oder es gibt wirklich keine Treffer).`;
+					}
+					return symbols
+						.slice(0, MAX_SYMBOL_RESULTS)
+						.map((s) => {
+							const relPath = vscode.workspace.asRelativePath(s.location.uri, false);
+							const line = s.location.range.start.line + 1;
+							return `${vscode.SymbolKind[s.kind]} "${s.name}" — ${relPath}:${line}`;
+						})
+						.join('\n');
+				} catch (err) {
+					return `Fehler bei der Symbolsuche: ${err instanceof Error ? err.message : String(err)}`;
+				}
+			},
+			describeCall: (input) => `🧭 Suche Symbol „${typeof input.query === 'string' ? input.query : '?'}“ …`,
+			describeResult: (input, result) => {
+				const q = typeof input.query === 'string' ? input.query : '?';
+				return /^(Keine Symbole|Fehler)/.test(result)
+					? `– keine Symbol-Treffer für „${q}“`
+					: `✓ ${result.split('\n').length} Symbol-Treffer für „${q}“`;
+			},
+		},
 	];
 
 	if (options.allowWrite) {
@@ -126,6 +244,58 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolDefini
 				const p = typeof input.path === 'string' ? input.path : '?';
 				return /^OK:/.test(result) ? `✓ „${p}“ geschrieben` : `✕ „${p}“ konnte nicht geschrieben werden`;
 			},
+		});
+	}
+
+	if (options.helper) {
+		const helper = options.helper;
+		let delegateCallSeq = 0;
+		tools.push({
+			name: 'delegate_search',
+			description:
+				'Stellt eine gezielte Recherchefrage an ein günstigeres/schnelleres Hilfsmodell (z. B. "In welcher Datei ist die Button-Komponente definiert und wie heißt ihre CSS-Klasse?"), statt selbst viele Dateien einzeln zu durchsuchen. Das Hilfsmodell hat Lesezugriff auf den Workspace (list_files/read_file/search_files/find_symbol, aber keinen Schreibzugriff) und antwortet knapp in Prosa. Nutze dies für Recherche/Exploration, NICHT für das eigentliche Schreiben von Code – das bleibt deine Aufgabe.',
+			inputSchema: {
+				type: 'object',
+				properties: {
+					question: { type: 'string', description: 'Die konkrete Recherche-/Suchfrage an das Hilfsmodell.' },
+				},
+				required: ['question'],
+			},
+			invoke: async (input) => {
+				const question = typeof input.question === 'string' ? input.question.trim() : '';
+				if (!question) {
+					return 'Fehler: Es wurde keine "question" angegeben.';
+				}
+				delegateCallSeq++;
+				const seq = delegateCallSeq;
+				const namespacedActivity: StageActivityCallback | undefined = helper.onActivity
+					? (event: StageActivityEvent) =>
+							helper.onActivity!(
+								event.type === 'start'
+									? { type: 'start', id: `delegate-${seq}-${event.id}`, label: `↳ ${event.label}` }
+									: { type: 'end', id: `delegate-${seq}-${event.id}`, label: event.label, ok: event.ok }
+							)
+					: undefined;
+				const subTools = createWorkspaceTools({ root: options.root, allowWrite: false, onWrite: () => {} });
+				try {
+					const result = await sendPromptWithTools(
+						helper.selector,
+						`Du bist ein Rechercheassistent für einen Software-Entwickler-Agenten. Beantworte die folgende Frage knapp und konkret anhand des tatsächlichen Workspace-Inhalts (Dateipfade, Codestellen, Namen) – nutze die verfügbaren Tools, um nachzuschauen statt zu raten. Schreibe keinen Code, sondern fasse zusammen, was du gefunden hast.\n\nFrage:\n${question}`,
+						subTools,
+						helper.token,
+						namespacedActivity,
+						helper.onUsage
+					);
+					return result.text.trim() || '(Hilfsmodell hat keine Antwort geliefert.)';
+				} catch (err) {
+					return `Fehler beim Abfragen des Hilfsmodells: ${err instanceof Error ? err.message : String(err)}`;
+				}
+			},
+			describeCall: (input) => `🪄 Frage Hilfsmodell: „${typeof input.question === 'string' ? input.question : '?'}“ …`,
+			describeResult: (_input, result) =>
+				/^Fehler beim Abfragen/.test(result)
+					? '✕ Hilfsmodell-Anfrage fehlgeschlagen'
+					: `✓ Antwort vom Hilfsmodell erhalten (${result.length.toLocaleString('de-DE')} Zeichen)`,
 		});
 	}
 

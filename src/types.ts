@@ -22,6 +22,13 @@ export interface AiStageDefinition {
 	tools: StageToolAccess;
 	includeWorkspaceContext: boolean;
 	gate?: StageGateConfig;
+	/** Optional cheaper/faster model that the 'delegate_search' tool hands narrow exploratory
+	 *  sub-questions to (e.g. "which file defines the Button component?"), so this stage's own
+	 *  (possibly more expensive) model isn't spent on menial lookup work. The tool is only
+	 *  offered when both fields are set — no default is guessed, since which models are cheap
+	 *  varies by Copilot plan/availability. Only meaningful when `tools` isn't 'none'. */
+	helperModelVendor?: string;
+	helperModelFamily?: string;
 	/** Pause for a manual "Weiter"/"Änderungen anfordern" confirmation after a successful
 	 *  (non-gated or gate-passed) run. Ignored while auto-mode or an automatic gate retry is
 	 *  in progress. */

@@ -498,6 +498,15 @@ export class PipelineController implements vscode.Disposable {
 				// Usage is reported live per tool-round via onUsage (so a long multi-round run
 				// shows its running Copilot-request count as it happens), so it must NOT also be
 				// added here from the final cumulative `toolsResult.usage` — that would double-count.
+				let helper: { selector: { vendor: string; family: string }; token: vscode.CancellationToken; onActivity: StageActivityCallback; onUsage: (delta: UsageInfo) => void } | undefined;
+				if (stage.helperModelVendor && stage.helperModelFamily) {
+					helper = {
+						selector: { vendor: stage.helperModelVendor, family: stage.helperModelFamily },
+						token,
+						onActivity,
+						onUsage: (delta) => this.addUsage(stage.id, delta),
+					};
+				}
 				const toolsResult = await sendPromptWithTools(
 					selector,
 					renderedPrompt,
@@ -505,6 +514,7 @@ export class PipelineController implements vscode.Disposable {
 						root: root as string,
 						allowWrite: stage.tools === 'readWrite',
 						onWrite: (change) => this.mergeFileChange(change),
+						helper,
 					}),
 					token,
 					onActivity,

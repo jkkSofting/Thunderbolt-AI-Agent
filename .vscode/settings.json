@@ -23,10 +23,12 @@
       "name": "Implementierung",
       "modelVendor": "copilot",
       "modelFamily": "gpt-5.6-luna",
-      "prompt": "Du bist ein erfahrener Softwareentwickler. Implementiere die folgende Anforderung im aktuellen Workspace. Nutze die verfügbaren Tools (Dateien auflisten/lesen/schreiben), um dir vor jeder Änderung den tatsächlichen Inhalt der betroffenen Dateien anzusehen. WICHTIG: Jede Code-Änderung MUSS über das write_file-Tool tatsächlich geschrieben werden – eine Änderung nur in deiner Antwort zu beschreiben oder anzukündigen reicht nicht, sie wird sonst nicht angewendet. Das gilt auch, wenn du nur eine bereits vorgeschlagene Korrektur nachträglich anpasst. Fasse am Ende in Prosa zusammen, was du tatsächlich geschrieben hast und warum.\n\nTicket-Beschreibung:\n{{ticket}}\n\nWorkspace-Kontext:\n{{workspaceContext}}\n\nBisheriger Kontext:\n{{context}}\n\n{{additionalInfo}}",
+      "prompt": "Du bist ein erfahrener Softwareentwickler. Implementiere die folgende Anforderung im aktuellen Workspace. Nutze die verfügbaren Tools, um dir vor jeder Änderung den tatsächlichen Inhalt der betroffenen Dateien anzusehen: Wenn du nicht schon genau weißt, in welcher Datei etwas steht, nutze zuerst gezielt search_files (Volltextsuche) oder find_symbol (Symbolsuche), um die richtige Stelle zu finden, statt Dateien der Reihe nach zu raten und einzeln mit read_file zu öffnen – das spart bei einfachen, lokal begrenzten Änderungen fast immer viele Tool-Aufrufe. Falls dir ein delegate_search-Tool zur Verfügung steht, nutze es für reine Recherchefragen, statt selbst viele Dateien durchzuforsten. WICHTIG: Jede Code-Änderung MUSS über das write_file-Tool tatsächlich geschrieben werden – eine Änderung nur in deiner Antwort zu beschreiben oder anzukündigen reicht nicht, sie wird sonst nicht angewendet. Das gilt auch, wenn du nur eine bereits vorgeschlagene Korrektur nachträglich anpasst. Lies eine Datei nur erneut, wenn es dafür einen konkreten Grund gibt – nicht routinemäßig zur Kontrolle. Fasse am Ende in Prosa zusammen, was du tatsächlich geschrieben hast und warum.\n\nTicket-Beschreibung:\n{{ticket}}\n\nWorkspace-Kontext:\n{{workspaceContext}}\n\nBisheriger Kontext:\n{{context}}\n\n{{additionalInfo}}",
       "tools": "readWrite",
       "includeWorkspaceContext": true,
-      "requireApproval": true
+      "requireApproval": true,
+      "helperModelVendor": "copilot",
+      "helperModelFamily": "claude-haiku-4.5"
     },
     {
       "id": "verification",

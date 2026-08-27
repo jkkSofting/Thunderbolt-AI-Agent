@@ -2,7 +2,7 @@
   "name": "thunderstorm",
   "displayName": "Thunderstorm",
   "description": "Generiert, verifiziert und verpackt Code-Änderungen aus einer Ticket-Beschreibung als Pull Request – gesteuert über eine konfigurierbare KI-Pipeline auf Basis der VS Code Language Model API und GitHub Copilot.",
-  "version": "0.7.3",
+  "version": "0.8.0",
   "publisher": "thunderstorm-local",
   "private": true,
   "engines": {
@@ -76,7 +76,7 @@
       "properties": {
         "thunderstorm.pipeline.stages": {
           "type": "array",
-          "markdownDescription": "Die Stufenkette, die Thunderstorm bei jedem Lauf ausführt – eine JSON-Liste beliebiger Länge, in Reihenfolge abgearbeitet. Bearbeitbar hier oder über den Verlauf-/Pipeline-Editor in der Sidebar (beide schreiben/lesen dieselbe Einstellung).\n\nJede Stufe hat ein `type`-Feld:\n- `ai`: KI-Aufruf mit `id`, `name`, `modelVendor`, `modelFamily`, `prompt` (Platzhalter: `{{ticket}}` `{{context}}` `{{lastResult}}` `{{fileChanges}}` `{{workspaceContext}}` `{{additionalInfo}}`), `tools` (`none`/`read`/`readWrite`), `includeWorkspaceContext`, `requireApproval`, optional `gate` mit `onFail: {action:'pause'}` oder `{action:'retryStage', targetStageId, maxAutoRetries}`.\n- `gitPr`: erstellt Branch/Commit/PR (`id`, `name`, `baseBranch`, `branchPrefix`, `autoCreatePullRequest`).\n- `userApproval`: manuelles Gate (`id`, `name`, `instructions`), optional `onReject: {targetStageId}` – Ziel-Stufe, an die eine Ablehnung (mit Begründung) zur Korrektur zurückgeschickt wird (Standard: die vorherige Stufe).\n\n`id`-Werte müssen innerhalb der Liste eindeutig sein (Ziel für `retryStage`/`onReject`).",
+          "markdownDescription": "Die Stufenkette, die Thunderstorm bei jedem Lauf ausführt – eine JSON-Liste beliebiger Länge, in Reihenfolge abgearbeitet. Bearbeitbar hier oder über den Verlauf-/Pipeline-Editor in der Sidebar (beide schreiben/lesen dieselbe Einstellung).\n\nJede Stufe hat ein `type`-Feld:\n- `ai`: KI-Aufruf mit `id`, `name`, `modelVendor`, `modelFamily`, `prompt` (Platzhalter: `{{ticket}}` `{{context}}` `{{lastResult}}` `{{fileChanges}}` `{{workspaceContext}}` `{{additionalInfo}}`), `tools` (`none`/`read`/`readWrite` – bei `read`/`readWrite` stehen neben `list_files`/`read_file`(/`write_file`) auch `search_files` (Volltextsuche über alle Dateien) und `find_symbol` (Symbolsuche über die Sprachintelligenz von VS Code) zur Verfügung), `includeWorkspaceContext`, `requireApproval`, optional `gate` mit `onFail: {action:'pause'}` oder `{action:'retryStage', targetStageId, maxAutoRetries}`, optional `helperModelVendor`/`helperModelFamily` – wenn beide gesetzt sind, bekommt die Stufe zusätzlich ein `delegate_search`-Tool, das Recherchefragen an dieses (typischerweise günstigere/schnellere) Modell auslagert, statt das Hauptmodell der Stufe mit reiner Fleißarbeit zu belasten.\n- `gitPr`: erstellt Branch/Commit/PR (`id`, `name`, `baseBranch`, `branchPrefix`, `autoCreatePullRequest`).\n- `userApproval`: manuelles Gate (`id`, `name`, `instructions`), optional `onReject: {targetStageId}` – Ziel-Stufe, an die eine Ablehnung (mit Begründung) zur Korrektur zurückgeschickt wird (Standard: die vorherige Stufe).\n\n`id`-Werte müssen innerhalb der Liste eindeutig sein (Ziel für `retryStage`/`onReject`).",
           "items": {
             "type": "object",
             "properties": {
@@ -90,6 +90,8 @@
               "includeWorkspaceContext": { "type": "boolean" },
               "requireApproval": { "type": "boolean" },
               "gate": { "type": "object" },
+              "helperModelVendor": { "type": "string" },
+              "helperModelFamily": { "type": "string" },
               "baseBranch": { "type": "string" },
               "branchPrefix": { "type": "string" },
               "autoCreatePullRequest": { "type": "boolean" },
@@ -120,7 +122,7 @@
               "tools": "readWrite",
               "includeWorkspaceContext": true,
               "requireApproval": true,
-              "prompt": "Du bist ein erfahrener Softwareentwickler. Implementiere die folgende Anforderung im aktuellen Workspace. Nutze die verfügbaren Tools (Dateien auflisten/lesen/schreiben), um dir vor jeder Änderung den tatsächlichen Inhalt der betroffenen Dateien anzusehen. WICHTIG: Jede Code-Änderung MUSS über das write_file-Tool tatsächlich geschrieben werden – eine Änderung nur in deiner Antwort zu beschreiben oder anzukündigen reicht nicht, sie wird sonst nicht angewendet. Das gilt auch, wenn du nur eine bereits vorgeschlagene Korrektur nachträglich anpasst. Fasse am Ende in Prosa zusammen, was du tatsächlich geschrieben hast und warum.\n\nTicket-Beschreibung:\n{{ticket}}\n\nWorkspace-Kontext:\n{{workspaceContext}}\n\nBisheriger Kontext:\n{{context}}\n\n{{additionalInfo}}"
+              "prompt": "Du bist ein erfahrener Softwareentwickler. Implementiere die folgende Anforderung im aktuellen Workspace. Nutze die verfügbaren Tools, um dir vor jeder Änderung den tatsächlichen Inhalt der betroffenen Dateien anzusehen: Wenn du nicht schon genau weißt, in welcher Datei etwas steht, nutze zuerst gezielt search_files (Volltextsuche) oder find_symbol (Symbolsuche), um die richtige Stelle zu finden, statt Dateien der Reihe nach zu raten und einzeln mit read_file zu öffnen – das spart bei einfachen, lokal begrenzten Änderungen fast immer viele Tool-Aufrufe. Falls dir ein delegate_search-Tool zur Verfügung steht, nutze es für reine Recherchefragen, statt selbst viele Dateien durchzuforsten. WICHTIG: Jede Code-Änderung MUSS über das write_file-Tool tatsächlich geschrieben werden – eine Änderung nur in deiner Antwort zu beschreiben oder anzukündigen reicht nicht, sie wird sonst nicht angewendet. Das gilt auch, wenn du nur eine bereits vorgeschlagene Korrektur nachträglich anpasst. Lies eine Datei nur erneut, wenn es dafür einen konkreten Grund gibt – nicht routinemäßig zur Kontrolle. Fasse am Ende in Prosa zusammen, was du tatsächlich geschrieben hast und warum.\n\nTicket-Beschreibung:\n{{ticket}}\n\nWorkspace-Kontext:\n{{workspaceContext}}\n\nBisheriger Kontext:\n{{context}}\n\n{{additionalInfo}}"
             },
             {
               "id": "verification",
