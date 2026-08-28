@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { ModelSelector } from '../config';
-import { DebugToolCallInfo, ResolvedModelInfo, UsageInfo } from '../types';
+import { DebugToolCallInfo, ImageAttachment, ResolvedModelInfo, UsageInfo } from '../types';
 
 export class LmError extends Error {}
 
@@ -56,14 +56,35 @@ function looksLikeToolFailure(result: string): boolean {
 	return /^(Fehler|Unbekanntes Tool)/.test(result.trim());
 }
 
+/** Turns attached screenshots into chat-message data parts. Only meaningful for models with
+ *  vision support; if the selected model can't handle images, the API surfaces that as a
+ *  regular LanguageModelError, which callers already turn into an LmError. */
+function toImageParts(images: ImageAttachment[] | undefined): vscode.LanguageModelDataPart[] {
+	if (!images || images.length === 0) {
+		return [];
+	}
+	try {
+		return images.map((img) => vscode.LanguageModelDataPart.image(Buffer.from(img.data, 'base64'), img.mimeType));
+	} catch {
+		// Older VS Code builds don't have LanguageModelDataPart.image at all.
+		throw new LmError('Bild-Anhänge werden von der installierten VS-Code-Version nicht unterstützt. Bitte VS Code aktualisieren.');
+	}
+}
+
+function buildUserContent(prompt: string, images: ImageAttachment[] | undefined): string | Array<vscode.LanguageModelTextPart | vscode.LanguageModelDataPart> {
+	const imageParts = toImageParts(images);
+	return imageParts.length ? [new vscode.LanguageModelTextPart(prompt), ...imageParts] : prompt;
+}
+
 export async function sendPrompt(
 	selector: ModelSelector,
 	prompt: string,
 	token: vscode.CancellationToken,
-	onActivity?: StageActivityCallback
+	onActivity?: StageActivityCallback,
+	images?: ImageAttachment[]
 ): Promise<PromptResult> {
 	const model = await selectModel(selector);
-	const messages = [vscode.LanguageModelChatMessage.User(prompt)];
+	const messages = [vscode.LanguageModelChatMessage.User(buildUserContent(prompt, images))];
 
 	onActivity?.({ type: 'start', id: 'request', label: '🤖 Anfrage an Modell läuft …' });
 	try {
@@ -123,7 +144,8 @@ export async function sendPromptWithTools(
 	tools: ToolDefinition[],
 	token: vscode.CancellationToken,
 	onActivity?: StageActivityCallback,
-	onUsage?: UsageCallback
+	onUsage?: UsageCallback,
+	images?: ImageAttachment[]
 ): Promise<PromptWithToolsResult> {
 	const model = await selectModel(selector);
 	const chatTools: vscode.LanguageModelChatTool[] = tools.map((tool) => ({
@@ -131,7 +153,7 @@ export async function sendPromptWithTools(
 		description: tool.description,
 		inputSchema: tool.inputSchema,
 	}));
-	const messages: vscode.LanguageModelChatMessage[] = [vscode.LanguageModelChatMessage.User(prompt)];
+	const messages: vscode.LanguageModelChatMessage[] = [vscode.LanguageModelChatMessage.User(buildUserContent(prompt, images))];
 	const allToolCalls: DebugToolCallInfo[] = [];
 	let requests = 0;
 	let inputTokens = await safeCountTokens(model, prompt, token);

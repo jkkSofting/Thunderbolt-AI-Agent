@@ -370,6 +370,81 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolDefini
 					? '✕ Hilfsmodell-Anfrage fehlgeschlagen'
 					: `✓ Antwort vom Hilfsmodell erhalten (${result.length.toLocaleString('de-DE')} Zeichen)`,
 		});
+
+		// Only offered to stages that can write themselves — a research-only stage (Anforderungs-
+		// analyse/Verifizierung) has no business spinning up agents that change files.
+		if (options.allowWrite) {
+			let subagentBatchSeq = 0;
+			tools.push({
+				name: 'run_subagents',
+				description:
+					'Startet bis zu 5 unabhängige Hilfs-Agenten GLEICHZEITIG (parallel), die jeweils eine eigene, in sich abgeschlossene Teilaufgabe im Workspace umsetzen (gleiches Werkzeug wie du: list_files/read_file/search_files/find_symbol/write_file/replace_in_file). Nutze dies NUR, wenn du dir wirklich sicher bist, dass sich die Aufgabe in 2 bis 5 voneinander UNABHÄNGIGE Teile zerlegen lässt (z. B. mehrere getrennte, sich nicht überschneidende Dateien) – bei Teilaufgaben, die sich gegenseitig beeinflussen oder dieselbe Datei anfassen, arbeite stattdessen selbst sequenziell weiter, sonst überschreiben sich die Agenten gegenseitig. Jeder Agent bekommt genau eine Teilaufgabe als eigenständigen Auftrag und antwortet mit einer kurzen Zusammenfassung, was er getan hat.',
+				inputSchema: {
+					type: 'object',
+					properties: {
+						tasks: {
+							type: 'array',
+							description:
+								'2 bis 5 klar formulierte, voneinander unabhängige Teilaufgaben – je eine für einen eigenen parallelen Agenten.',
+							items: { type: 'string' },
+							minItems: 2,
+							maxItems: 5,
+						},
+					},
+					required: ['tasks'],
+				},
+				invoke: async (input) => {
+					const rawTasks = Array.isArray(input.tasks) ? input.tasks : [];
+					const tasks = rawTasks
+						.filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
+						.map((t) => t.trim());
+					if (tasks.length < 2) {
+						return 'Fehler: "tasks" muss mindestens 2 unabhängige Teilaufgaben enthalten (sonst lohnt sich kein separater Agent — erledige es direkt selbst).';
+					}
+					const limited = tasks.slice(0, 5);
+					subagentBatchSeq++;
+					const batchSeq = subagentBatchSeq;
+					const outcomes = await Promise.all(
+						limited.map(async (task, i) => {
+							const agentNo = i + 1;
+							let namespacedActivity: StageActivityCallback | undefined;
+							if (helper.onActivity) {
+								namespacedActivity = (event: StageActivityEvent) => {
+									const namespacedId = `subagent-${batchSeq}-${i}-${event.id}`;
+									if (event.type === 'start') {
+										helper.onActivity!({ type: 'start', id: namespacedId, label: `🧑‍💻 Agent ${agentNo}: ${event.label}` });
+									} else {
+										helper.onActivity!({ type: 'end', id: namespacedId, label: event.label, ok: event.ok });
+									}
+								};
+							}
+							const subTools = createWorkspaceTools({ root: options.root, allowRead: true, allowWrite: true, onWrite: options.onWrite });
+							try {
+								const result = await sendPromptWithTools(
+									helper.selector,
+									`Du bist einer von mehreren parallel arbeitenden Hilfs-Agenten innerhalb einer größeren Implementierungsaufgabe. Setze AUSSCHLIESSLICH die folgende, für dich vorgesehene Teilaufgabe um — sie ist bewusst so gewählt, dass sie unabhängig von den Teilaufgaben der anderen gerade parallel laufenden Agenten ist. Nutze write_file/replace_in_file, um Änderungen tatsächlich anzuwenden; eine Änderung nur zu beschreiben reicht nicht. Fasse am Ende knapp in Prosa zusammen, was du getan hast.\n\nDeine Teilaufgabe:\n${task}`,
+									subTools,
+									helper.token,
+									namespacedActivity,
+									helper.onUsage
+								);
+								return { task, ok: true, summary: result.text.trim() || '(keine Zusammenfassung geliefert)' };
+							} catch (err) {
+								return { task, ok: false, summary: `Fehler: ${err instanceof Error ? err.message : String(err)}` };
+							}
+						})
+					);
+					return outcomes
+						.map((o, i) => `Agent ${i + 1} (Teilaufgabe: "${o.task}") – ${o.ok ? 'OK' : 'Fehler'}:\n${o.summary}`)
+						.join('\n\n');
+				},
+				describeCall: (input) => {
+					const n = Array.isArray(input.tasks) ? input.tasks.length : 0;
+					return `🧑‍💻 Starte ${n} parallele Agenten …`;
+				},
+				describeResult: (_input, result) => `✓ Parallele Agenten abgeschlossen (${result.split('\n\n').length} Ergebnis(se))`,
+			});
+		}
 	}
 
 	return tools;

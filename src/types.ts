@@ -101,6 +101,16 @@ export interface FileChange {
 	newContent: string;
 }
 
+/** A screenshot/image attached alongside the ticket description, sent to every 'ai' stage's
+ *  model call as visual context (e.g. a screenshot of a bug or a UI mockup). `data` is the raw
+ *  image bytes, base64-encoded (no `data:` URL prefix). */
+export interface ImageAttachment {
+	id: string;
+	name: string;
+	mimeType: string;
+	data: string;
+}
+
 export interface UsageInfo {
 	/** Number of chat requests sent to the language model — the actual unit GitHub Copilot
 	 *  bills "premium requests" against. This is real, not estimated. */
@@ -114,6 +124,7 @@ export interface UsageInfo {
 export interface PipelineState {
 	phase: 'idle' | 'running' | 'done' | 'aborted';
 	ticketText: string;
+	images: ImageAttachment[];
 	stages: StageRuntimeState[];
 	fileChanges: FileChange[];
 	prUrl?: string;

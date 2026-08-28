@@ -27,9 +27,13 @@
 
 	const DEFAULT_EXPANDED_STATUSES = new Set(['active', 'waitingInput', 'waitingApproval', 'error', 'aborted']);
 
+	const MAX_ATTACHED_IMAGES = 6;
+	const MAX_ATTACHED_IMAGE_BYTES = 8 * 1024 * 1024;
+
 	let state = {
 		phase: 'idle',
 		ticketText: '',
+		images: [],
 		stages: [],
 		fileChanges: [],
 		busy: false,
@@ -38,6 +42,9 @@
 		debugMode: false,
 		usage: { requests: 0, inputTokens: 0, outputTokens: 0 },
 	};
+	// Screenshots attached to the ticket before starting a run; sent along with 'start' and
+	// cleared once the run begins (afterwards, state.images from the extension is authoritative).
+	let attachedImages = [];
 	const userExpanded = new Set();
 	const userCollapsed = new Set();
 
@@ -330,6 +337,39 @@
 
 	// ------------------------------------------------------------- Start form
 
+	function readImageFile(file) {
+		return new Promise((resolve, reject) => {
+			const reader = new FileReader();
+			reader.onload = () => {
+				const result = String(reader.result || '');
+				const commaIdx = result.indexOf(',');
+				resolve({
+					id: `img-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+					name: file.name || 'Screenshot',
+					mimeType: file.type || 'image/png',
+					data: commaIdx >= 0 ? result.slice(commaIdx + 1) : result,
+				});
+			};
+			reader.onerror = () => reject(reader.error);
+			reader.readAsDataURL(file);
+		});
+	}
+
+	function renderImageThumbs(images, onRemove) {
+		const row = el('div', { class: 'image-attachments' });
+		for (const img of images) {
+			const thumb = el('div', { class: 'image-thumb' });
+			thumb.appendChild(el('img', { src: `data:${img.mimeType};base64,${img.data}`, title: img.name }));
+			if (onRemove) {
+				const removeBtn = el('button', { class: 'image-thumb-remove', title: 'Entfernen' }, '✕');
+				removeBtn.addEventListener('click', () => onRemove(img));
+				thumb.appendChild(removeBtn);
+			}
+			row.appendChild(thumb);
+		}
+		return row;
+	}
+
 	function renderStartForm() {
 		const container = el('div');
 		container.appendChild(
@@ -344,6 +384,66 @@
 			id: 'ticket-input',
 			placeholder: 'z. B. "Füge einen Umschalter für den Dark Mode auf der Einstellungsseite hinzu ..."',
 		});
+
+		const thumbsRow = renderImageThumbs(attachedImages, (img) => {
+			attachedImages = attachedImages.filter((i) => i.id !== img.id);
+			render();
+		});
+
+		function addImageFiles(files) {
+			const room = MAX_ATTACHED_IMAGES - attachedImages.length;
+			if (room <= 0) {
+				return;
+			}
+			const accepted = files.filter((f) => f.type.startsWith('image/') && f.size <= MAX_ATTACHED_IMAGE_BYTES).slice(0, room);
+			if (!accepted.length) {
+				return;
+			}
+			Promise.all(accepted.map(readImageFile)).then((images) => {
+				attachedImages = attachedImages.concat(images);
+				render();
+			});
+		}
+
+		textarea.addEventListener('paste', (event) => {
+			const items = event.clipboardData && event.clipboardData.items;
+			if (!items) {
+				return;
+			}
+			const files = [];
+			for (const item of items) {
+				if (item.kind === 'file' && item.type.startsWith('image/')) {
+					const file = item.getAsFile();
+					if (file) {
+						files.push(file);
+					}
+				}
+			}
+			if (files.length) {
+				event.preventDefault();
+				addImageFiles(files);
+			}
+		});
+
+		textarea.addEventListener('dragover', (event) => event.preventDefault());
+		textarea.addEventListener('drop', (event) => {
+			const files = event.dataTransfer && event.dataTransfer.files;
+			if (files && files.length) {
+				event.preventDefault();
+				addImageFiles(Array.from(files));
+			}
+		});
+
+		const fileInput = el('input', { type: 'file', accept: 'image/*', multiple: 'multiple', style: 'display:none' });
+		fileInput.addEventListener('change', () => {
+			if (fileInput.files && fileInput.files.length) {
+				addImageFiles(Array.from(fileInput.files));
+				fileInput.value = '';
+			}
+		});
+		const attachBtn = el('button', { class: 'secondary' }, '📷 Bild/Screenshot anhängen');
+		attachBtn.disabled = attachedImages.length >= MAX_ATTACHED_IMAGES;
+		attachBtn.addEventListener('click', () => fileInput.click());
 
 		const autoModeCheckbox = el('input', { type: 'checkbox', id: 'auto-mode-checkbox' });
 		const autoModeLabel = el(
@@ -360,13 +460,20 @@
 			if (!text) {
 				return;
 			}
-			vscode.postMessage({ type: 'start', text, autoMode: autoModeCheckbox.checked });
+			vscode.postMessage({ type: 'start', text, autoMode: autoModeCheckbox.checked, images: attachedImages });
+			attachedImages = [];
 		});
 		container.appendChild(textarea);
+		container.appendChild(el('div', { class: 'actions' }, attachBtn, fileInput));
+		container.appendChild(
+			el('p', { class: 'image-attachments-hint' }, `Screenshots per Klick, Einfügen (Strg+V) oben ins Textfeld oder Ziehen möglich. Max. ${MAX_ATTACHED_IMAGES} Bilder.`)
+		);
+		container.appendChild(thumbsRow);
 		container.appendChild(el('div', { class: 'actions' }, autoModeLabel));
 		container.appendChild(el('div', { class: 'actions' }, startBtn));
 		return container;
 	}
+
 
 	// ----------------------------------------------------------- Pipeline run
 
@@ -415,6 +522,9 @@
 		container.appendChild(topBar);
 
 		container.appendChild(el('div', { class: 'ticket-preview' }, state.ticketText));
+		if (state.images && state.images.length) {
+			container.appendChild(renderImageThumbs(state.images, null));
+		}
 
 		if (state.usage && state.usage.requests > 0) {
 			container.appendChild(renderUsageBadge(state.usage));

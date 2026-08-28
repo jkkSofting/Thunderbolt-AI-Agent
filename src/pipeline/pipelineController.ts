@@ -17,6 +17,7 @@ import {
 	GateVerdict,
 	GitPrStageDefinition,
 	HistoryEntry,
+	ImageAttachment,
 	PipelineDefinition,
 	PipelineState,
 	ResolvedModelInfo,
@@ -53,6 +54,7 @@ function initialState(definition: PipelineDefinition): PipelineState {
 	return {
 		phase: 'idle',
 		ticketText: '',
+		images: [],
 		stages: initialStages(definition),
 		fileChanges: [],
 		busy: false,
@@ -428,7 +430,7 @@ export class PipelineController implements vscode.Disposable {
 
 	// ---- Ablaufsteuerung ------------------------------------------------------
 
-	async start(ticketText: string, autoMode: boolean): Promise<void> {
+	async start(ticketText: string, autoMode: boolean, images: ImageAttachment[] = []): Promise<void> {
 		const trimmed = ticketText.trim();
 		if (!trimmed) {
 			return;
@@ -436,6 +438,7 @@ export class PipelineController implements vscode.Disposable {
 		this.definition = getPipelineDefinition();
 		this.state = initialState(this.definition);
 		this.state.ticketText = trimmed;
+		this.state.images = images;
 		this.state.phase = 'running';
 		this.state.autoMode = autoMode;
 		this.state.debugMode = this.debugMode;
@@ -560,7 +563,7 @@ export class PipelineController implements vscode.Disposable {
 			let promptResult: PromptResult;
 			let toolCalls: DebugToolCallInfo[] | undefined;
 			if (stage.tools === 'none' && !hasHelper) {
-				promptResult = await sendPrompt(selector, renderedPrompt, token, onActivity);
+				promptResult = await sendPrompt(selector, renderedPrompt, token, onActivity, this.state.images);
 				this.addUsage(stage.id, promptResult.usage);
 			} else {
 				// Usage is reported live per tool-round via onUsage (so a long multi-round run
@@ -587,7 +590,8 @@ export class PipelineController implements vscode.Disposable {
 					}),
 					token,
 					onActivity,
-					(delta) => this.addUsage(stage.id, delta)
+					(delta) => this.addUsage(stage.id, delta),
+					this.state.images
 				);
 				promptResult = toolsResult;
 				toolCalls = toolsResult.toolCalls;

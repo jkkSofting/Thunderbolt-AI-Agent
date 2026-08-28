@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { getSidebarHtml } from './getHtml';
 import { PipelineController } from '../pipeline/pipelineController';
 import { getPipelineDefinition, parsePipelineDefinition, savePipelineDefinition } from '../config';
+import { ImageAttachment } from '../types';
 
 interface InboundMessage {
 	type: string;
@@ -10,6 +11,44 @@ interface InboundMessage {
 	autoMode?: boolean;
 	enabled?: boolean;
 	stages?: unknown;
+	images?: unknown;
+}
+
+const MAX_IMAGES = 6;
+/** Raw byte cap per image (base64 is ~4/3 the size of the raw bytes) — keeps a run of several
+ *  screenshots from ballooning prompt payloads or webview-message size unreasonably. */
+const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+
+/** Validates/sanitizes the image attachments a webview message claims to carry. The webview is
+ *  our own UI, but its message payload still crosses a trust boundary (it's just HTML/JS in a
+ *  sandboxed view), so shape and size are checked here rather than assumed. */
+function sanitizeImages(raw: unknown): ImageAttachment[] {
+	if (!Array.isArray(raw)) {
+		return [];
+	}
+	const result: ImageAttachment[] = [];
+	for (const item of raw) {
+		if (result.length >= MAX_IMAGES) {
+			break;
+		}
+		if (!item || typeof item !== 'object') {
+			continue;
+		}
+		const { id, name, mimeType, data } = item as Record<string, unknown>;
+		if (typeof mimeType !== 'string' || !mimeType.startsWith('image/')) {
+			continue;
+		}
+		if (typeof data !== 'string' || !data || data.length * 0.75 > MAX_IMAGE_BYTES) {
+			continue;
+		}
+		result.push({
+			id: typeof id === 'string' && id ? id : `img${result.length}`,
+			name: typeof name === 'string' && name ? name : 'Screenshot',
+			mimeType,
+			data,
+		});
+	}
+	return result;
 }
 
 export class SidebarProvider implements vscode.WebviewViewProvider {
@@ -55,7 +94,7 @@ export class SidebarProvider implements vscode.WebviewViewProvider {
 				this.sendPipelineDefinition();
 				return;
 			case 'start':
-				await this.controller.start(message.text ?? '', !!message.autoMode);
+				await this.controller.start(message.text ?? '', !!message.autoMode, sanitizeImages(message.images));
 				return;
 			case 'submitAdditionalInfo':
 				if (message.stageId) {
