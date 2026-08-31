@@ -47,6 +47,14 @@
 	let attachedImages = [];
 	const userExpanded = new Set();
 	const userCollapsed = new Set();
+	// A long-running "Implementierung" stage can rack up dozens of tool calls; showing every one
+	// forever turned the activity feed into an ever-growing wall of text (the user's core
+	// complaint). While a stage is still running we only tail the last few live steps; once it
+	// settles we collapse to a one-line "N Aktionen ausgeführt" summary. Stage ids added here have
+	// been explicitly expanded by the user and stay expanded until they re-collapse it or the
+	// stage starts a fresh run.
+	const activityExpanded = new Set();
+	const MAX_LIVE_ACTIVITY_ITEMS = 4;
 
 	let historyEntries = [];
 	let viewMode = 'pipeline';
@@ -582,6 +590,12 @@
 	}
 
 	function renderStage(stage) {
+		if (stage.status === 'active' && (!stage.activity || stage.activity.length === 0)) {
+			// Fresh run of this stage just started — don't carry over an expand choice from a
+			// previous round's (possibly much longer) activity trace.
+			activityExpanded.delete(stage.id);
+		}
+
 		const li = el('li', { class: 'step' });
 		li.dataset.status = stage.status;
 
@@ -633,11 +647,7 @@
 		}
 
 		if (stage.activity && stage.activity.length) {
-			const activityList = el('ul', { class: 'activity-list' });
-			for (const a of stage.activity) {
-				activityList.appendChild(el('li', { class: `activity-item activity-${a.status}` }, a.label));
-			}
-			frag.appendChild(activityList);
+			frag.appendChild(renderActivity(stage));
 		} else if (stage.status === 'active') {
 			frag.appendChild(el('div', { class: 'busy-indicator' }, 'Wird verarbeitet …'));
 		}
@@ -664,6 +674,55 @@
 			frag.appendChild(renderUserApprovalControls(stage));
 		}
 
+		return frag;
+	}
+
+	/** Renders a stage's live activity feed. While the stage is still running, only the most
+	 *  recent {@link MAX_LIVE_ACTIVITY_ITEMS} steps are shown (older ones fold into a "… N frühere
+	 *  Schritte" line) so a long tool-calling run doesn't turn into an endless scrolling list.
+	 *  Once the stage settles, the whole feed collapses to a one-line summary that the user can
+	 *  expand on demand to see the full trace. */
+	function renderActivity(stage) {
+		const items = stage.activity;
+		const isRunning = stage.status === 'active';
+		const expanded = activityExpanded.has(stage.id);
+		const frag = el('div', { class: 'activity-wrap' });
+
+		if (!isRunning && !expanded) {
+			const errorCount = items.filter((a) => a.status === 'error').length;
+			const summaryText = errorCount
+				? `${items.length} Aktion(en) ausgeführt, ${errorCount} fehlgeschlagen`
+				: `${items.length} Aktion(en) ausgeführt`;
+			const toggle = el('button', { class: 'link activity-toggle' }, `▸ ${summaryText}`);
+			toggle.addEventListener('click', (e) => {
+				e.stopPropagation();
+				activityExpanded.add(stage.id);
+				render();
+			});
+			frag.appendChild(toggle);
+			return frag;
+		}
+
+		const visible = expanded ? items : items.slice(-MAX_LIVE_ACTIVITY_ITEMS);
+		const hiddenCount = items.length - visible.length;
+		if (hiddenCount > 0) {
+			frag.appendChild(el('div', { class: 'activity-more muted' }, `… ${hiddenCount} frühere Schritt(e) ausgeblendet`));
+		}
+		const activityList = el('ul', { class: 'activity-list' });
+		for (const a of visible) {
+			activityList.appendChild(el('li', { class: `activity-item activity-${a.status}` }, a.label));
+		}
+		frag.appendChild(activityList);
+
+		if (expanded && !isRunning) {
+			const collapseBtn = el('button', { class: 'link activity-toggle' }, '▾ Einklappen');
+			collapseBtn.addEventListener('click', (e) => {
+				e.stopPropagation();
+				activityExpanded.delete(stage.id);
+				render();
+			});
+			frag.appendChild(collapseBtn);
+		}
 		return frag;
 	}
 

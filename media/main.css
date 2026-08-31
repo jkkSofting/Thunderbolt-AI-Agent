@@ -470,6 +470,49 @@ button.danger:hover {
 	margin-bottom: 2px;
 }
 
+.activity-wrap {
+	margin: 4px 0 8px 0;
+}
+
+.activity-list {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.activity-item {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding: 2px 0;
+	font-size: 0.9em;
+	opacity: 0.85;
+}
+
+.activity-item.activity-running {
+	opacity: 1;
+	color: var(--vscode-progressBar-background, var(--vscode-focusBorder));
+}
+
+.activity-item.activity-error {
+	opacity: 1;
+	color: var(--vscode-errorForeground);
+}
+
+.activity-more {
+	margin-bottom: 2px;
+}
+
+.activity-toggle {
+	padding: 2px 0;
+	font-size: 0.9em;
+}
+
+.busy-indicator {
+	opacity: 0.7;
+	font-size: 0.9em;
+}
+
 .muted {
 	opacity: 0.7;
 	font-size: 0.9em;
