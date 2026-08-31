@@ -9,6 +9,7 @@ import { gatherWorkspaceContext } from '../context/workspaceContext';
 import { GitService } from '../git/gitService';
 import { OriginalContentProvider, THUNDERSTORM_ORIGINAL_SCHEME } from '../diff/originalContentProvider';
 import { DEFAULT_PIPELINE } from './defaultPipeline';
+import { ProjectMemoryStore } from './projectMemory';
 import {
 	AiStageDefinition,
 	DebugInfo,
@@ -189,12 +190,18 @@ export class PipelineController implements vscode.Disposable {
 	private readonly historyEmitter = new vscode.EventEmitter<HistoryEntry[]>();
 	readonly onDidChangeHistory = this.historyEmitter.event;
 	private readonly outputChannel = vscode.window.createOutputChannel('Thunderstorm');
+	/** Standing, cross-ticket notes (e.g. project conventions clarified once via
+	 *  {@link submitAdditionalInfo}) — unlike {@link pendingAdditionalInfo}, this survives
+	 *  {@link reset} and VS Code restarts so the same gate doesn't ask the same question again
+	 *  on the next ticket. */
+	private readonly projectMemory: ProjectMemoryStore;
 
-	constructor() {
+	constructor(storageUri?: vscode.Uri) {
 		this.contentProviderRegistration = vscode.workspace.registerTextDocumentContentProvider(
 			THUNDERSTORM_ORIGINAL_SCHEME,
 			this.originalContentProvider
 		);
+		this.projectMemory = new ProjectMemoryStore(storageUri);
 	}
 
 	getState(): PipelineState {
@@ -512,7 +519,17 @@ export class PipelineController implements vscode.Disposable {
 	private async executeAiStage(index: number, stage: AiStageDefinition): Promise<StageOutcome> {
 		// Every round's note (manual or gate-injected) stays in the list — a later round still
 		// sees what was said in earlier ones, not just the latest.
-		const additionalInfo = (this.pendingAdditionalInfo.get(stage.id) ?? []).join('\n\n');
+		const runNotes = (this.pendingAdditionalInfo.get(stage.id) ?? []).join('\n\n');
+		await this.projectMemory.load();
+		const standingNotes = this.projectMemory.getForStage(stage.id);
+		const additionalInfo = [
+			standingNotes.length
+				? `Bereits bekannte, projektweite Vorgaben aus früheren Tickets (nicht erneut danach fragen):\n- ${standingNotes.join('\n- ')}`
+				: '',
+			runNotes,
+		]
+			.filter(Boolean)
+			.join('\n\n');
 
 		let title = stage.name;
 		if (this.activeRetryJump !== undefined) {
@@ -746,6 +763,11 @@ export class PipelineController implements vscode.Disposable {
 			return;
 		}
 		this.addPendingInfo(stageId, text.trim());
+		// A user-typed answer here is usually a standing project fact (e.g. "coverage tool:
+		// JaCoCo") rather than something specific to this one ticket, so it's kept beyond this
+		// run — see {@link projectMemory}. Gate-injected feedback (handleGateFailure) is NOT
+		// persisted this way since that's per-ticket review feedback, not reusable knowledge.
+		await this.projectMemory.add(stageId, stage.name, text.trim());
 		await this.advanceFrom(index);
 	}
 
@@ -1035,6 +1057,12 @@ export class PipelineController implements vscode.Disposable {
 		this.originalContentProvider.clear();
 		this.state.debugMode = this.debugMode;
 		this.emit();
+	}
+
+	/** Forgets every standing cross-ticket note gathered via {@link submitAdditionalInfo}
+	 *  (e.g. because a project convention changed) — does not touch the current run. */
+	async clearProjectMemory(): Promise<void> {
+		await this.projectMemory.clear();
 	}
 
 	dispose(): void {

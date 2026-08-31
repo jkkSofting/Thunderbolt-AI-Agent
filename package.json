@@ -69,6 +69,10 @@
       {
         "command": "thunderstorm.showDebugOutput",
         "title": "Thunderstorm: Debug-Ausgabe anzeigen"
+      },
+      {
+        "command": "thunderstorm.clearProjectMemory",
+        "title": "Thunderstorm: Projekt-Gedächtnis leeren"
       }
     ],
     "configuration": {

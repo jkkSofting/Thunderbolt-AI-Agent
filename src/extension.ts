@@ -3,7 +3,7 @@ import { PipelineController } from './pipeline/pipelineController';
 import { SidebarProvider } from './webview/sidebarProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
-	const controller = new PipelineController();
+	const controller = new PipelineController(context.storageUri);
 	const sidebarProvider = new SidebarProvider(context.extensionUri, controller);
 
 	context.subscriptions.push(
@@ -18,7 +18,11 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('thunderstorm.listModels', () => listModels()),
 		vscode.commands.registerCommand('thunderstorm.abortNow', () => controller.abortNow()),
 		vscode.commands.registerCommand('thunderstorm.abortAfterCurrentStep', () => controller.requestAbortAfterCurrentStep()),
-		vscode.commands.registerCommand('thunderstorm.showDebugOutput', () => controller.showDebugOutput())
+		vscode.commands.registerCommand('thunderstorm.showDebugOutput', () => controller.showDebugOutput()),
+		vscode.commands.registerCommand('thunderstorm.clearProjectMemory', async () => {
+			await controller.clearProjectMemory();
+			vscode.window.showInformationMessage('Thunderstorm: Projekt-Gedächtnis geleert.');
+		})
 	);
 }
 
