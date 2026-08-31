@@ -2,7 +2,7 @@
   "name": "thunderstorm",
   "displayName": "Thunderstorm",
   "description": "Generiert, verifiziert und verpackt Code-Änderungen aus einer Ticket-Beschreibung als Pull Request – gesteuert über eine konfigurierbare KI-Pipeline auf Basis der VS Code Language Model API und GitHub Copilot.",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "publisher": "thunderstorm-local",
   "private": true,
   "engines": {

@@ -67,13 +67,18 @@ interface ToolRoundRecord {
 
 /** How many of the most recent tool rounds are sent to the model in full (including full tool
  *  result text, e.g. entire file contents). Older rounds are collapsed into one short summary
- *  line per call instead of resent verbatim. Without this, a long-running stage's conversation
- *  grows without bound — every round resends every earlier round's full history — which both
- *  slows every subsequent request down (more tokens to process each time) and, once the
- *  conversation gets large enough, appears to trigger the Copilot backend mangling the
+ *  line per call instead of resent verbatim. Without any bound, a long-running stage's
+ *  conversation grows without limit — every round resends every earlier round's full history —
+ *  which both slows every subsequent request down (more tokens to process each time) and, once
+ *  the conversation gets large enough, appears to trigger the Copilot backend mangling the
  *  tool_call/tool_result pairing when it truncates history for the underlying model (surfaced as
- *  "No tool call found for function call output ..."). Bounding history size fixes both. */
-const KEEP_FULL_TOOL_ROUNDS = 6;
+ *  "No tool call found for function call output ..."). That specific failure already has its own
+ *  fallback below (`forceFullCompaction`, triggered by {@link isToolPairingError}), so this value
+ *  only needs to be large enough that the model keeps real working memory (e.g. the exact content
+ *  it just wrote to a file) for as long as a normal task takes — folding it away too early is what
+ *  causes the model to lose track of its own recent edits and redundantly re-read/redo them,
+ *  which burns far more rounds than a wider window ever would. */
+const KEEP_FULL_TOOL_ROUNDS = 20;
 
 /** Rounds are folded into the summary in batches of this size rather than one at a time. Folding
  *  one round per request would change the summary text (and therefore the whole prefix sent to
@@ -355,7 +360,7 @@ export async function sendPromptWithTools(
 			allToolCalls.push({ name: call.name, input: call.input, result: resultText });
 			roundToolResultText += `${resultText}\n`;
 			resultParts.push(new vscode.LanguageModelToolResultPart(call.callId, [new vscode.LanguageModelTextPart(resultText)]));
-			summaryLines.push(`- ${call.name}(${truncateOneLine(JSON.stringify(call.input ?? {}), 150)}) → ${truncateOneLine(resultText, 150)}`);
+			summaryLines.push(`- ${call.name}(${truncateOneLine(JSON.stringify(call.input ?? {}), 300)}) → ${truncateOneLine(resultText, 300)}`);
 		}
 		inputTokens += await safeCountTokens(model, roundToolResultText, token);
 		rounds.push({
