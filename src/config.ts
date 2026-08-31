@@ -50,6 +50,7 @@ function validateAiStage(raw: Record<string, unknown>, index: number): AiStageDe
 		gate,
 		helperModelVendor: isNonEmptyString(raw.helperModelVendor) ? raw.helperModelVendor : undefined,
 		helperModelFamily: isNonEmptyString(raw.helperModelFamily) ? raw.helperModelFamily : undefined,
+		clarifierStageId: isNonEmptyString(raw.clarifierStageId) ? raw.clarifierStageId : undefined,
 	};
 }
 

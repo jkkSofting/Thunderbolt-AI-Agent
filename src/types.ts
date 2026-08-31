@@ -29,6 +29,14 @@ export interface AiStageDefinition {
 	 *  varies by Copilot plan/availability. Only meaningful when `tools` isn't 'none'. */
 	helperModelVendor?: string;
 	helperModelFamily?: string;
+	/** Optional id of another 'ai' stage in the pipeline whose model acts as a "boss" this stage
+	 *  can ask a concrete clarifying question when the ticket is ambiguous and the stage's own
+	 *  reasoning/code-reading can't resolve it. Adds an 'ask_clarifying_question' tool that hands
+	 *  the question (plus the original ticket text) to that stage's configured model and returns
+	 *  its answer inline — no user interaction, so a stalled stage gets an authoritative answer
+	 *  and keeps going instead of guessing or looping indefinitely. Only meaningful when `tools`
+	 *  isn't 'none'; ignored if the referenced stage id doesn't exist or isn't an 'ai' stage. */
+	clarifierStageId?: StageId;
 	/** Pause for a manual "Weiter"/"Änderungen anfordern" confirmation after a successful
 	 *  (non-gated or gate-passed) run. Ignored while auto-mode or an automatic gate retry is
 	 *  in progress. */

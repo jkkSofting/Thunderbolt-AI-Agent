@@ -540,6 +540,9 @@ export class PipelineController implements vscode.Disposable {
 			this.setStageState(stage.id, { activity: activityLog.slice() });
 		};
 		const hasHelper = !!(stage.helperModelVendor && stage.helperModelFamily);
+		const clarifierTargetStage =
+			stage.tools !== 'none' && stage.clarifierStageId ? this.definition.stages[this.stageIndex(stage.clarifierStageId)] : undefined;
+		const hasClarifier = !!(clarifierTargetStage && clarifierTargetStage.type === 'ai');
 		try {
 			const root = this.getWorkspaceRoot();
 			if ((stage.tools !== 'none' || hasHelper) && !root) {
@@ -578,6 +581,17 @@ export class PipelineController implements vscode.Disposable {
 						onUsage: (delta) => this.addUsage(stage.id, delta),
 					};
 				}
+				let clarifier: { selector: { vendor: string; family: string }; stageName: string; ticketText: string; token: vscode.CancellationToken; onActivity: StageActivityCallback; onUsage: (delta: UsageInfo) => void } | undefined;
+				if (hasClarifier && clarifierTargetStage?.type === 'ai') {
+					clarifier = {
+						selector: { vendor: clarifierTargetStage.modelVendor, family: clarifierTargetStage.modelFamily },
+						stageName: clarifierTargetStage.name,
+						ticketText: this.state.ticketText,
+						token,
+						onActivity,
+						onUsage: (delta) => this.addUsage(stage.id, delta),
+					};
+				}
 				const toolsResult = await sendPromptWithTools(
 					selector,
 					renderedPrompt,
@@ -587,6 +601,7 @@ export class PipelineController implements vscode.Disposable {
 						allowWrite: stage.tools === 'readWrite',
 						onWrite: (change) => this.mergeFileChange(change),
 						helper,
+						clarifier,
 					}),
 					token,
 					onActivity,

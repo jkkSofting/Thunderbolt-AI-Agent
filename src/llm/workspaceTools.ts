@@ -33,6 +33,19 @@ export interface WorkspaceToolsOptions {
 		onActivity?: StageActivityCallback;
 		onUsage?: UsageCallback;
 	};
+	/** If set, adds an 'ask_clarifying_question' tool that hands a concrete question (plus the
+	 *  original ticket text) to another pipeline stage's model — the stage that judged whether the
+	 *  ticket was clear enough to implement in the first place — and returns its answer inline. Lets
+	 *  a stuck stage get an authoritative decision instead of guessing or spinning on an ambiguity
+	 *  it can't resolve by reading code alone. */
+	clarifier?: {
+		selector: ModelSelector;
+		stageName: string;
+		ticketText: string;
+		token: vscode.CancellationToken;
+		onActivity?: StageActivityCallback;
+		onUsage?: UsageCallback;
+	};
 }
 
 /** Tools that let an 'ai' stage explore, read, and (if granted) write the workspace on demand,
@@ -445,6 +458,45 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolDefini
 				describeResult: (_input, result) => `✓ Parallele Agenten abgeschlossen (${result.split('\n\n').length} Ergebnis(se))`,
 			});
 		}
+	}
+
+	if (options.clarifier) {
+		const clarifier = options.clarifier;
+		tools.push({
+			name: 'ask_clarifying_question',
+			description:
+				`Stellt eine einzelne, konkrete Frage an die Stufe "${clarifier.stageName}" (die die ursprüngliche Ticket-Beschreibung bereits bewertet hat) und liefert deren Antwort zurück. Nutze dies NUR bei einer echten, blockierenden Unklarheit oder einem Widerspruch in der Ticket-Beschreibung, den du weder durch eigene Analyse noch durch einen Blick in den bestehenden Code auflösen kannst – nicht für Fragen, die du selbst durch eine sinnvolle Annahme beantworten kannst. Formuliere eine einzelne, präzise Frage statt eines offenen Rundumschlags.`,
+			inputSchema: {
+				type: 'object',
+				properties: {
+					question: { type: 'string', description: 'Die konkrete, einzelne Frage zur Ticket-Beschreibung.' },
+				},
+				required: ['question'],
+			},
+			invoke: async (input) => {
+				const question = typeof input.question === 'string' ? input.question.trim() : '';
+				if (!question) {
+					return 'Fehler: Es wurde keine "question" angegeben.';
+				}
+				const subTools = createWorkspaceTools({ root: options.root, allowRead: true, allowWrite: false, onWrite: () => {} });
+				try {
+					const result = await sendPromptWithTools(
+						clarifier.selector,
+						`Du triffst gerade die Rolle "${clarifier.stageName}" für dieses Ticket – sozusagen der Verantwortliche, der die Anforderung kennt. Ein Entwickler-Agent setzt das Ticket gerade um und hat auf eine konkrete Unklarheit gestoßen, die ihn blockiert. Beantworte die Frage kurz, konkret und entscheidungsfreudig anhand der Ticket-Beschreibung. Lässt die Ticket-Beschreibung das offen, triff selbst eine sinnvolle, pragmatische Entscheidung und teile sie klar mit – weiche der Frage nicht aus und antworte nicht mit "kommt darauf an" o. Ä., der Entwickler wartet auf eine Antwort, um weiterzumachen. Nutze bei Bedarf die verfügbaren Tools, um kurz im bestehenden Code nachzusehen, statt zu raten.\n\nTicket-Beschreibung:\n${clarifier.ticketText}\n\nFrage des Entwickler-Agenten:\n${question}`,
+						subTools,
+						clarifier.token,
+						clarifier.onActivity,
+						clarifier.onUsage
+					);
+					return result.text.trim() || '(Keine Antwort erhalten.)';
+				} catch (err) {
+					return `Fehler beim Abfragen von "${clarifier.stageName}": ${err instanceof Error ? err.message : String(err)}`;
+				}
+			},
+			describeCall: (input) => `❓ Frage an "${clarifier.stageName}": „${typeof input.question === 'string' ? input.question : '?'}“ …`,
+			describeResult: (_input, result) =>
+				/^Fehler beim Abfragen/.test(result) ? '✕ Rückfrage fehlgeschlagen' : `✓ Antwort von "${clarifier.stageName}" erhalten`,
+		});
 	}
 
 	return tools;
