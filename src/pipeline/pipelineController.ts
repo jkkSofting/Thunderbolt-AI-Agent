@@ -577,6 +577,18 @@ export class PipelineController implements vscode.Disposable {
 			if (stage.gate) {
 				renderedPrompt += GATE_INSTRUCTION_SUFFIX;
 			}
+			// A multi-round tool-calling stage resends its first message on every round (the
+			// chat API is stateless) — `renderedPrompt` includes the stage's full, often long
+			// instructional prose, which only needs to be read once. From round 2 onward, only
+			// the parts that stay relevant throughout (the actual ticket + any notes) are resent;
+			// what to do with the tools is already covered by each tool's own description.
+			const continuationPrompt = [
+				'Du bearbeitest weiterhin dieselbe Aufgabe (vollständige Anweisungen siehe deine erste Anfrage in diesem Durchlauf; die Tool-Beschreibungen erklären, wann welches Tool sinnvoll ist).',
+				`Ticket-Beschreibung:\n${this.state.ticketText}`,
+				additionalInfo,
+			]
+				.filter(Boolean)
+				.join('\n\n');
 
 			const token = this.newToken();
 			const selector = { vendor: stage.modelVendor, family: stage.modelFamily };
@@ -623,7 +635,8 @@ export class PipelineController implements vscode.Disposable {
 					token,
 					onActivity,
 					(delta) => this.addUsage(stage.id, delta),
-					this.state.images
+					this.state.images,
+					continuationPrompt
 				);
 				promptResult = toolsResult;
 				toolCalls = toolsResult.toolCalls;

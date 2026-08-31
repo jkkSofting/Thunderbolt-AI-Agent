@@ -52,6 +52,13 @@ export interface WorkspaceToolsOptions {
  *  instead of being limited to a small upfront context snapshot or a rigid output schema. */
 export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolDefinition[] {
 	const tools: ToolDefinition[] = [];
+	// Remembers each file's full content (pre-truncation) by absolute path across every
+	// read_file call made through this particular tool set (i.e. for the lifetime of one stage's
+	// — or one delegate/subagent's — tool loop). Re-reading a file "just to double check" is
+	// common and, since a stage's full history keeps resending its recent rounds verbatim (see
+	// KEEP_FULL_TOOL_ROUNDS in lmClient.ts), paying for the same up-to-8000-char content twice is
+	// pure waste when nothing on disk actually changed since the last read.
+	const readCache = new Map<string, string>();
 
 	if (options.allowRead) {
 		tools.push(
@@ -103,6 +110,10 @@ export function createWorkspaceTools(options: WorkspaceToolsOptions): ToolDefini
 					const absPath = resolveWorkspacePath(options.root, relPath);
 					const bytes = await vscode.workspace.fs.readFile(vscode.Uri.file(absPath));
 					const text = Buffer.from(bytes).toString('utf8');
+					if (readCache.get(absPath) === text) {
+						return `(Inhalt von "${relPath}" ist unverändert seit dem letzten read_file dieser Datei in diesem Durchlauf – siehe dort.)`;
+					}
+					readCache.set(absPath, text);
 					return text.length > MAX_FILE_CHARS
 						? `${text.slice(0, MAX_FILE_CHARS)}\n… (Datei gekürzt, ${text.length} Zeichen insgesamt)`
 						: text;

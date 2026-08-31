@@ -216,6 +216,15 @@ const MAX_TOOL_ROUNDS = Infinity;
  * tool results fed back → request again, until the model responds with plain text or the
  * round limit is hit. The full tool-call trace and per-round usage are returned alongside the
  * final text so callers can surface them for debugging/usage tracking.
+ *
+ * `prompt` is resent as the first message on EVERY round (the chat-completions API is
+ * stateless — there's no server-side session to lean on), so a long, mostly-instructional
+ * prompt is paid for again and again over a multi-round call. `continuationPrompt`, if given,
+ * replaces it from round 1 onward — round 0 still gets the full `prompt` (so the model reads
+ * the complete task once), but later rounds only need the parts that stay relevant throughout
+ * (e.g. the ticket text), not the one-time "how to use these tools" preamble that's already
+ * covered by the tools' own descriptions. Callers that don't have a meaningfully shorter
+ * continuation prompt can simply omit it — behavior is then unchanged from before.
  */
 export async function sendPromptWithTools(
 	selector: ModelSelector,
@@ -224,7 +233,8 @@ export async function sendPromptWithTools(
 	token: vscode.CancellationToken,
 	onActivity?: StageActivityCallback,
 	onUsage?: UsageCallback,
-	images?: ImageAttachment[]
+	images?: ImageAttachment[],
+	continuationPrompt?: string
 ): Promise<PromptWithToolsResult> {
 	const model = await selectModel(selector);
 	const chatTools: vscode.LanguageModelChatTool[] = tools.map((tool) => ({
@@ -233,6 +243,10 @@ export async function sendPromptWithTools(
 		inputSchema: tool.inputSchema,
 	}));
 	const initialMessage = vscode.LanguageModelChatMessage.User(buildUserContent(prompt, images));
+	// Images are only meaningful on round 0 — by the time the model is several rounds into the
+	// task it has already "seen" them once (same as it has the full prompt), so there's no need
+	// to keep paying for their (often sizeable) token cost on every later round too.
+	const continuationMessage = vscode.LanguageModelChatMessage.User(continuationPrompt ?? prompt);
 	const rounds: ToolRoundRecord[] = [];
 	const allToolCalls: DebugToolCallInfo[] = [];
 	let requests = 0;
@@ -258,7 +272,11 @@ export async function sendPromptWithTools(
 		let compactRetried = false;
 		for (;;) {
 			try {
-				const messages = buildRequestMessages(initialMessage, rounds, forceFullCompaction ? 0 : KEEP_FULL_TOOL_ROUNDS);
+				const messages = buildRequestMessages(
+					round === 0 ? initialMessage : continuationMessage,
+					rounds,
+					forceFullCompaction ? 0 : KEEP_FULL_TOOL_ROUNDS
+				);
 				response = await model.sendRequest(messages, { tools: chatTools }, token);
 				break;
 			} catch (err) {
