@@ -14,13 +14,13 @@
 
 	const STATUS_GLYPHS = {
 		pending: '',
-		active: '…',
+		active: '',
 		waitingInput: '!',
 		waitingApproval: '!',
 		completed: '✓',
 		skipped: '–',
 		error: '✕',
-		aborted: '⏹',
+		aborted: '■',
 	};
 
 	const TYPE_LABELS = { ai: 'KI', gitPr: 'Git/PR', userApproval: 'Manuelles Gate' };
@@ -29,6 +29,7 @@
 
 	const MAX_ATTACHED_IMAGES = 6;
 	const MAX_ATTACHED_IMAGE_BYTES = 8 * 1024 * 1024;
+	const COMPOSER_MAX_HEIGHT = 180;
 
 	let state = {
 		phase: 'idle',
@@ -58,6 +59,7 @@
 
 	let historyEntries = [];
 	let viewMode = 'pipeline';
+	let lastRenderedView = null;
 	const expandedHistoryEntries = new Set();
 
 	let pipelineDefinition = { stages: [] };
@@ -69,6 +71,16 @@
 	// window.confirm() doesn't reliably work inside a VS Code webview (sandboxed iframe, no
 	// allow-modals), so deleting a stage used a two-step in-page confirm instead.
 	let pendingDeleteConfirm = null;
+
+	// The composer is the single text input of the whole sidebar (chat-style). render() rebuilds
+	// the DOM wholesale, so its draft text, caret and focus live here and get restored afterwards
+	// — otherwise a state update mid-typing (they arrive many times per second while a stage runs)
+	// would wipe what the user was writing.
+	let composerDraft = '';
+	let composerFocused = false;
+	let composerSelection = null;
+	// Auto-mode is chosen before a run starts; while a run is active state.autoMode wins.
+	let pendingAutoMode = false;
 
 	// While a stage with tool access runs, state updates can arrive many times per second (one
 	// per tool call/round via the live activity feed). Rendering rebuilds the whole #app tree
@@ -164,44 +176,90 @@
 		render();
 	}
 
+	// ------------------------------------------------------------------ Shell
+
 	function render() {
 		const app = document.getElementById('app');
-		app.innerHTML = '';
-		app.appendChild(renderTopBar());
-		if (viewMode === 'history') {
-			app.appendChild(renderHistoryView());
-		} else if (viewMode === 'stages') {
-			app.appendChild(renderStagesView());
-		} else if (!state || state.phase === 'idle') {
-			app.appendChild(renderStartForm());
-		} else {
-			app.appendChild(renderPipeline());
+
+		// Preserve the transcript scroll position across the full rebuild, and keep following the
+		// newest output when the user was already parked at the bottom (chat behaviour).
+		const previousMain = app.querySelector('.app-main');
+		const sameView = lastRenderedView === viewMode;
+		let previousScroll = 0;
+		let wasAtBottom = true;
+		if (previousMain && sameView) {
+			previousScroll = previousMain.scrollTop;
+			wasAtBottom = previousMain.scrollHeight - previousMain.scrollTop - previousMain.clientHeight < 24;
 		}
+
+		app.innerHTML = '';
+		app.appendChild(renderHeader());
+
+		const main = el('div', { class: 'app-main' });
+		if (viewMode === 'history') {
+			main.appendChild(renderHistoryView());
+		} else if (viewMode === 'stages') {
+			main.appendChild(renderStagesView());
+		} else if (!state || state.phase === 'idle') {
+			main.appendChild(renderWelcome());
+		} else {
+			main.appendChild(renderPipeline());
+		}
+		app.appendChild(main);
+
+		if (viewMode === 'pipeline') {
+			app.appendChild(renderComposer());
+		}
+		app.appendChild(renderStatusBar());
+
+		if (sameView) {
+			main.scrollTop = wasAtBottom ? main.scrollHeight : previousScroll;
+		}
+		lastRenderedView = viewMode;
+
+		restoreComposerFocus();
 	}
 
-	function renderTopBar() {
-		const bar = el('div', { class: 'global-top-bar' });
+	function iconButton(glyph, title, onClick, active) {
+		const btn = el('button', { class: active ? 'icon-btn active' : 'icon-btn', title, 'aria-label': title }, glyph);
+		btn.addEventListener('click', onClick);
+		return btn;
+	}
 
-		const titleRow = el('div', { class: 'global-title-row' });
-		titleRow.appendChild(el('h1', {}, 'Thunderstorm'));
+	function renderHeader() {
+		const header = el('div', { class: 'app-header' });
 
-		const debugCheckbox = el('input', { type: 'checkbox' });
-		debugCheckbox.checked = !!(state && state.debugMode);
-		debugCheckbox.addEventListener('change', () => {
-			vscode.postMessage({ type: 'setDebugMode', enabled: debugCheckbox.checked });
+		const brandRow = el('div', { class: 'brand-row' });
+		brandRow.appendChild(
+			el('div', { class: 'brand' }, el('span', { class: 'brand-mark' }, '⚡'), el('span', { class: 'brand-name' }, 'Thunderstorm'))
+		);
+
+		const headerActions = el('div', { class: 'header-actions' });
+		const newRunBtn = iconButton('＋', 'Neuer Vorgang (Pipeline zurücksetzen)', () => {
+			composerDraft = '';
+			attachedImages = [];
+			vscode.postMessage({ type: 'reset' });
 		});
-		const debugLabel = el('label', { class: 'checkbox-label debug-toggle' }, debugCheckbox, ' Debug-Modus');
-		titleRow.appendChild(debugLabel);
-
-		const outputBtn = el('button', { class: 'link' }, 'Debug-Ausgabe');
-		outputBtn.addEventListener('click', () => vscode.postMessage({ type: 'showDebugOutput' }));
-		titleRow.appendChild(outputBtn);
-
-		bar.appendChild(titleRow);
+		newRunBtn.disabled = !state || state.phase === 'idle';
+		headerActions.appendChild(newRunBtn);
+		headerActions.appendChild(
+			iconButton(
+				'⚙',
+				state && state.debugMode ? 'Debug-Modus aktiv – klicken zum Deaktivieren' : 'Debug-Modus aktivieren',
+				() => vscode.postMessage({ type: 'setDebugMode', enabled: !(state && state.debugMode) }),
+				!!(state && state.debugMode)
+			)
+		);
+		headerActions.appendChild(iconButton('⧉', 'Debug-Ausgabe öffnen', () => vscode.postMessage({ type: 'showDebugOutput' })));
+		brandRow.appendChild(headerActions);
+		header.appendChild(brandRow);
 
 		const tabs = el('div', { class: 'view-tabs' });
-		const makeTab = (mode, label) => {
+		const makeTab = (mode, label, count) => {
 			const btn = el('button', { class: viewMode === mode ? 'tab-btn active' : 'tab-btn' }, label);
+			if (count) {
+				btn.appendChild(el('span', { class: 'tab-count' }, String(count)));
+			}
 			btn.addEventListener('click', () => {
 				viewMode = mode;
 				render();
@@ -209,11 +267,341 @@
 			return btn;
 		};
 		tabs.appendChild(makeTab('pipeline', 'Pipeline'));
-		tabs.appendChild(makeTab('history', `Verlauf${historyEntries.length ? ` (${historyEntries.length})` : ''}`));
-		tabs.appendChild(makeTab('stages', `Stufen (${(pipelineDefinition.stages || []).length})`));
-		bar.appendChild(tabs);
+		tabs.appendChild(makeTab('history', 'Verlauf', historyEntries.length));
+		tabs.appendChild(makeTab('stages', 'Stufen', (pipelineDefinition.stages || []).length));
+		header.appendChild(tabs);
 
+		return header;
+	}
+
+	function phaseIndicator() {
+		if (!state || state.phase === 'idle') {
+			return { glyph: '○', text: 'Bereit', on: false };
+		}
+		if (state.phase === 'running') {
+			const waiting = (state.stages || []).find((s) => s.status === 'waitingInput' || s.status === 'waitingApproval');
+			if (waiting) {
+				return { glyph: '◆', text: 'Wartet auf Sie', on: true };
+			}
+			return { glyph: '◐', text: state.abortRequested ? 'Abbruch vorgemerkt' : 'Läuft …', on: true };
+		}
+		if (state.phase === 'aborted') {
+			return { glyph: '■', text: 'Abgebrochen', on: false };
+		}
+		return { glyph: '✓', text: 'Abgeschlossen', on: false };
+	}
+
+	function renderStatusBar() {
+		const bar = el('div', { class: 'app-status' });
+		const phase = phaseIndicator();
+		bar.appendChild(el('span', { class: phase.on ? 'status-item on' : 'status-item' }, `${phase.glyph} ${phase.text}`));
+
+		const autoOn = state && state.phase !== 'idle' ? !!state.autoMode : pendingAutoMode;
+		if (autoOn) {
+			bar.appendChild(el('span', { class: 'status-item on', title: 'Bestätigungs-Gates laufen ohne Rückfrage durch.' }, '⚡ Auto'));
+		}
+
+		bar.appendChild(el('span', { class: 'status-spacer' }));
+
+		if (state && state.usage && state.usage.requests > 0) {
+			bar.appendChild(
+				el(
+					'span',
+					{
+						class: 'status-item',
+						title: 'Anfragen = echte Copilot-Anfragen. Tokens = grobe Schätzung, keine offizielle Abrechnungsgröße.',
+					},
+					formatUsageText(state.usage)
+				)
+			);
+		} else {
+			bar.appendChild(
+				el('span', { class: 'status-item' }, `${(pipelineDefinition.stages || []).length} Stufen konfiguriert`)
+			);
+		}
 		return bar;
+	}
+
+	// --------------------------------------------------------------- Composer
+
+	/** Works out what the composer's text currently means: starting a run, answering an open
+	 *  question, requesting changes, or rejecting an approval gate. Returns `null` when there is
+	 *  nothing to type (a stage is busy, or the run only offers buttons). */
+	function composerTarget() {
+		if (!state || state.phase === 'idle' || state.phase === 'done' || state.phase === 'aborted') {
+			return {
+				kind: 'start',
+				placeholder: 'Beschreiben Sie das Ticket …',
+				sendTitle: 'Pipeline starten (Enter)',
+				allowImages: true,
+			};
+		}
+
+		const stage = (state.stages || []).find((s) => s.status === 'waitingInput' || s.status === 'waitingApproval');
+		if (!stage) {
+			return null;
+		}
+
+		if (stage.status === 'waitingInput') {
+			const def = findStageDef(stage.id);
+			const isRetryGate = !!(def && def.gate && def.gate.onFail && def.gate.onFail.action === 'retryStage');
+			if (isRetryGate) {
+				return null;
+			}
+			return {
+				kind: 'additionalInfo',
+				stageId: stage.id,
+				placeholder: 'Fehlende Informationen ergänzen …',
+				sendTitle: 'Antwort senden und erneut prüfen (Enter)',
+				tip: `„${stage.name}" braucht noch Angaben. Antwort hier eingeben – oder oben den Entwickler selbst entscheiden lassen.`,
+			};
+		}
+
+		if (stage.type === 'userApproval') {
+			const def = findStageDef(stage.id);
+			const targetId = def && def.onReject ? def.onReject.targetStageId : undefined;
+			const targetName = targetId ? (findStageDef(targetId) || {}).name || targetId : undefined;
+			return {
+				kind: 'reject',
+				stageId: stage.id,
+				placeholder: 'Begründung für die Ablehnung …',
+				sendTitle: 'Ablehnen und Begründung senden (Enter)',
+				tip: targetName
+					? `Freigeben über den Button oben – oder hier begründen, dann geht es zurück an „${targetName}".`
+					: 'Freigeben über den Button oben – oder hier begründen, warum die Änderungen abgelehnt werden.',
+			};
+		}
+
+		return {
+			kind: 'changes',
+			stageId: stage.id,
+			placeholder: 'Änderungen an dieser Stufe anfordern …',
+			sendTitle: 'Änderungen anfordern (Enter)',
+			tip: `„${stage.name}" wartet auf Bestätigung. Mit „Weiter" oben fortfahren – oder hier Änderungen anfordern.`,
+		};
+	}
+
+	function sendComposer(target) {
+		const text = composerDraft.trim();
+		if (!target || !text || state.busy) {
+			return;
+		}
+		if (target.kind === 'start') {
+			vscode.postMessage({ type: 'start', text, autoMode: pendingAutoMode, images: attachedImages });
+			attachedImages = [];
+		} else if (target.kind === 'additionalInfo') {
+			vscode.postMessage({ type: 'submitAdditionalInfo', stageId: target.stageId, text });
+		} else if (target.kind === 'changes') {
+			vscode.postMessage({ type: 'requestStageChanges', stageId: target.stageId, text });
+		} else if (target.kind === 'reject') {
+			vscode.postMessage({ type: 'rejectUserApproval', stageId: target.stageId, text });
+		}
+		composerDraft = '';
+		composerSelection = null;
+		render();
+	}
+
+	function autoGrow(textarea) {
+		textarea.style.height = 'auto';
+		textarea.style.height = `${Math.min(textarea.scrollHeight, COMPOSER_MAX_HEIGHT)}px`;
+	}
+
+	function restoreComposerFocus() {
+		const input = document.querySelector('.composer-input');
+		if (!input) {
+			return;
+		}
+		autoGrow(input);
+		if (!composerFocused || input.disabled) {
+			return;
+		}
+		input.focus();
+		const pos = composerSelection === null ? input.value.length : Math.min(composerSelection, input.value.length);
+		input.setSelectionRange(pos, pos);
+	}
+
+	function addImageFiles(files) {
+		const room = MAX_ATTACHED_IMAGES - attachedImages.length;
+		if (room <= 0) {
+			return;
+		}
+		const accepted = files.filter((f) => f.type.startsWith('image/') && f.size <= MAX_ATTACHED_IMAGE_BYTES).slice(0, room);
+		if (!accepted.length) {
+			return;
+		}
+		Promise.all(accepted.map(readImageFile)).then((images) => {
+			attachedImages = attachedImages.concat(images);
+			render();
+		});
+	}
+
+	function renderComposer() {
+		const wrap = el('div', { class: 'app-composer' });
+		const target = composerTarget();
+		const disabled = !target || !!state.busy;
+
+		const tipText = target
+			? target.tip
+			: state.abortRequested
+			? 'Abbruch vorgemerkt – die Pipeline stoppt nach der aktuellen Stufe.'
+			: 'Die Pipeline arbeitet. Sobald eine Stufe eine Rückmeldung braucht, können Sie hier antworten.';
+		if (tipText) {
+			wrap.appendChild(el('div', { class: 'composer-tip' }, tipText));
+		} else if (target && target.kind === 'start') {
+			wrap.appendChild(
+				el(
+					'div',
+					{ class: 'composer-tip' },
+					el('strong', {}, 'Tipp: '),
+					'Screenshots per Strg+V direkt einfügen. Enter startet, Umschalt+Enter macht eine neue Zeile.'
+				)
+			);
+		}
+
+		const box = el('div', { class: disabled ? 'composer-box disabled' : 'composer-box' });
+
+		const allowImages = !!(target && target.allowImages);
+		if (allowImages && attachedImages.length) {
+			box.appendChild(
+				el(
+					'div',
+					{ class: 'composer-attachments' },
+					...attachedImages.map((img) =>
+						imageThumb(img, () => {
+							attachedImages = attachedImages.filter((i) => i.id !== img.id);
+							render();
+						})
+					)
+				)
+			);
+		}
+
+		const input = el('textarea', {
+			class: 'composer-input',
+			rows: '1',
+			placeholder: target ? target.placeholder : 'Pipeline läuft …',
+		});
+		input.value = composerDraft;
+		input.disabled = disabled;
+		input.addEventListener('input', () => {
+			composerDraft = input.value;
+			composerSelection = input.selectionStart;
+			autoGrow(input);
+			sendBtn.disabled = disabled || !composerDraft.trim();
+		});
+		input.addEventListener('keyup', () => {
+			composerSelection = input.selectionStart;
+		});
+		input.addEventListener('click', () => {
+			composerSelection = input.selectionStart;
+		});
+		input.addEventListener('focus', () => {
+			composerFocused = true;
+		});
+		input.addEventListener('blur', () => {
+			composerFocused = false;
+		});
+		input.addEventListener('keydown', (event) => {
+			if (event.key === 'Enter' && !event.shiftKey) {
+				event.preventDefault();
+				sendComposer(target);
+			}
+		});
+
+		if (allowImages) {
+			input.addEventListener('paste', (event) => {
+				const items = event.clipboardData && event.clipboardData.items;
+				if (!items) {
+					return;
+				}
+				const files = [];
+				for (const item of items) {
+					if (item.kind === 'file' && item.type.startsWith('image/')) {
+						const file = item.getAsFile();
+						if (file) {
+							files.push(file);
+						}
+					}
+				}
+				if (files.length) {
+					event.preventDefault();
+					composerDraft = input.value;
+					addImageFiles(files);
+				}
+			});
+			input.addEventListener('dragover', (event) => event.preventDefault());
+			input.addEventListener('drop', (event) => {
+				const files = event.dataTransfer && event.dataTransfer.files;
+				if (files && files.length) {
+					event.preventDefault();
+					composerDraft = input.value;
+					addImageFiles(Array.from(files));
+				}
+			});
+		}
+		box.appendChild(input);
+
+		const toolbar = el('div', { class: 'composer-toolbar' });
+
+		const fileInput = el('input', { type: 'file', accept: 'image/*', multiple: 'multiple', style: 'display:none' });
+		fileInput.addEventListener('change', () => {
+			if (fileInput.files && fileInput.files.length) {
+				addImageFiles(Array.from(fileInput.files));
+				fileInput.value = '';
+			}
+		});
+		const attachBtn = iconButton('＋', `Bild/Screenshot anhängen (max. ${MAX_ATTACHED_IMAGES})`, () => fileInput.click());
+		attachBtn.disabled = !allowImages || attachedImages.length >= MAX_ATTACHED_IMAGES;
+		toolbar.appendChild(attachBtn);
+		toolbar.appendChild(fileInput);
+
+		if (target && target.kind === 'start') {
+			const autoChip = el(
+				'button',
+				{
+					class: pendingAutoMode ? 'composer-chip on' : 'composer-chip',
+					title: 'Auto-Modus: Bestätigungs-Gates automatisch durchlaufen, ohne nach jeder Stufe nachzufragen.',
+				},
+				'⚡ Auto-Modus'
+			);
+			autoChip.addEventListener('click', () => {
+				pendingAutoMode = !pendingAutoMode;
+				render();
+			});
+			toolbar.appendChild(autoChip);
+
+			const stageCount = (pipelineDefinition.stages || []).length;
+			const stagesChip = el(
+				'button',
+				{ class: 'composer-chip static', title: 'Konfigurierte Stufenkette anzeigen' },
+				`◇ ${stageCount} Stufen`
+			);
+			stagesChip.addEventListener('click', () => {
+				viewMode = 'stages';
+				render();
+			});
+			toolbar.appendChild(stagesChip);
+		} else if (target) {
+			const targetStage = (state.stages || []).find((s) => s.id === target.stageId);
+			toolbar.appendChild(
+				el(
+					'span',
+					{ class: 'composer-chip static', title: 'Diese Stufe erhält Ihre Eingabe' },
+					`↳ ${targetStage ? targetStage.name : 'Aktuelle Stufe'}`
+				)
+			);
+		}
+
+		toolbar.appendChild(el('span', { class: 'composer-toolbar-spacer' }));
+
+		const sendBtn = el('button', { class: 'composer-send', title: target ? target.sendTitle : 'Nicht verfügbar' }, '↑');
+		sendBtn.disabled = disabled || !composerDraft.trim();
+		sendBtn.addEventListener('click', () => sendComposer(target));
+		toolbar.appendChild(sendBtn);
+
+		box.appendChild(toolbar);
+		wrap.appendChild(box);
+		return wrap;
 	}
 
 	// ---------------------------------------------------------------- History
@@ -222,7 +610,7 @@
 		const container = el('div');
 		if (historyEntries.length === 0) {
 			container.appendChild(
-				el('p', {}, 'Noch keine Einträge. Der Verlauf füllt sich, sobald die Pipeline eine KI-Anfrage stellt.')
+				el('div', { class: 'empty-state' }, 'Noch keine Einträge. Der Verlauf füllt sich, sobald die Pipeline eine KI-Anfrage stellt.')
 			);
 			return container;
 		}
@@ -343,7 +731,7 @@
 		return card;
 	}
 
-	// ------------------------------------------------------------- Start form
+	// ------------------------------------------------------------ Attachments
 
 	function readImageFile(file) {
 		return new Promise((resolve, reject) => {
@@ -363,125 +751,55 @@
 		});
 	}
 
+	function imageThumb(img, onRemove) {
+		const thumb = el('div', { class: 'image-thumb' });
+		thumb.appendChild(el('img', { src: `data:${img.mimeType};base64,${img.data}`, title: img.name }));
+		if (onRemove) {
+			const removeBtn = el('button', { class: 'image-thumb-remove', title: 'Entfernen' }, '✕');
+			removeBtn.addEventListener('click', onRemove);
+			thumb.appendChild(removeBtn);
+		}
+		return thumb;
+	}
+
 	function renderImageThumbs(images, onRemove) {
 		const row = el('div', { class: 'image-attachments' });
 		for (const img of images) {
-			const thumb = el('div', { class: 'image-thumb' });
-			thumb.appendChild(el('img', { src: `data:${img.mimeType};base64,${img.data}`, title: img.name }));
-			if (onRemove) {
-				const removeBtn = el('button', { class: 'image-thumb-remove', title: 'Entfernen' }, '✕');
-				removeBtn.addEventListener('click', () => onRemove(img));
-				thumb.appendChild(removeBtn);
-			}
-			row.appendChild(thumb);
+			row.appendChild(imageThumb(img, onRemove ? () => onRemove(img) : null));
 		}
 		return row;
 	}
 
-	function renderStartForm() {
-		const container = el('div');
+	// --------------------------------------------------------------- Welcome
+
+	function renderWelcome() {
+		const container = el('div', { class: 'welcome' });
+		container.appendChild(el('div', { class: 'welcome-title' }, 'Womit sollen wir anfangen?'));
 		container.appendChild(
 			el(
 				'p',
-				{},
-				'Beschreiben Sie das umzusetzende Ticket. Thunderstorm arbeitet die konfigurierte Stufenkette ab (siehe Tab „Stufen") und bereitet am Ende einen Pull Request vor.'
+				{ class: 'welcome-text' },
+				'Beschreiben Sie unten das umzusetzende Ticket. Thunderstorm arbeitet die konfigurierte Stufenkette ab und bereitet am Ende einen Pull Request vor.'
 			)
 		);
-		container.appendChild(el('label', { class: 'field-label' }, 'Ticket-Beschreibung'));
-		const textarea = el('textarea', {
-			id: 'ticket-input',
-			placeholder: 'z. B. "Füge einen Umschalter für den Dark Mode auf der Einstellungsseite hinzu ..."',
-		});
 
-		const thumbsRow = renderImageThumbs(attachedImages, (img) => {
-			attachedImages = attachedImages.filter((i) => i.id !== img.id);
-			render();
-		});
-
-		function addImageFiles(files) {
-			const room = MAX_ATTACHED_IMAGES - attachedImages.length;
-			if (room <= 0) {
-				return;
-			}
-			const accepted = files.filter((f) => f.type.startsWith('image/') && f.size <= MAX_ATTACHED_IMAGE_BYTES).slice(0, room);
-			if (!accepted.length) {
-				return;
-			}
-			Promise.all(accepted.map(readImageFile)).then((images) => {
-				attachedImages = attachedImages.concat(images);
-				render();
+		const stages = pipelineDefinition.stages || [];
+		if (stages.length) {
+			const chain = el('div', { class: 'welcome-chain' });
+			stages.forEach((stage, index) => {
+				chain.appendChild(
+					el(
+						'span',
+						{ class: 'chain-chip', title: `${TYPE_LABELS[stage.type] || stage.type} · id: ${stage.id}` },
+						el('span', { class: 'chain-chip-index' }, String(index + 1)),
+						stage.name
+					)
+				);
 			});
+			container.appendChild(chain);
 		}
-
-		textarea.addEventListener('paste', (event) => {
-			const items = event.clipboardData && event.clipboardData.items;
-			if (!items) {
-				return;
-			}
-			const files = [];
-			for (const item of items) {
-				if (item.kind === 'file' && item.type.startsWith('image/')) {
-					const file = item.getAsFile();
-					if (file) {
-						files.push(file);
-					}
-				}
-			}
-			if (files.length) {
-				event.preventDefault();
-				addImageFiles(files);
-			}
-		});
-
-		textarea.addEventListener('dragover', (event) => event.preventDefault());
-		textarea.addEventListener('drop', (event) => {
-			const files = event.dataTransfer && event.dataTransfer.files;
-			if (files && files.length) {
-				event.preventDefault();
-				addImageFiles(Array.from(files));
-			}
-		});
-
-		const fileInput = el('input', { type: 'file', accept: 'image/*', multiple: 'multiple', style: 'display:none' });
-		fileInput.addEventListener('change', () => {
-			if (fileInput.files && fileInput.files.length) {
-				addImageFiles(Array.from(fileInput.files));
-				fileInput.value = '';
-			}
-		});
-		const attachBtn = el('button', { class: 'secondary' }, '📷 Bild/Screenshot anhängen');
-		attachBtn.disabled = attachedImages.length >= MAX_ATTACHED_IMAGES;
-		attachBtn.addEventListener('click', () => fileInput.click());
-
-		const autoModeCheckbox = el('input', { type: 'checkbox', id: 'auto-mode-checkbox' });
-		const autoModeLabel = el(
-			'label',
-			{ class: 'checkbox-label' },
-			autoModeCheckbox,
-			' Auto-Modus: Bestätigungs-Gates automatisch durchlaufen, ohne nach jeder Stufe nachzufragen'
-		);
-
-		const startBtn = el('button', {}, 'Pipeline starten');
-		startBtn.disabled = !!state.busy;
-		startBtn.addEventListener('click', () => {
-			const text = textarea.value.trim();
-			if (!text) {
-				return;
-			}
-			vscode.postMessage({ type: 'start', text, autoMode: autoModeCheckbox.checked, images: attachedImages });
-			attachedImages = [];
-		});
-		container.appendChild(textarea);
-		container.appendChild(el('div', { class: 'actions' }, attachBtn, fileInput));
-		container.appendChild(
-			el('p', { class: 'image-attachments-hint' }, `Screenshots per Klick, Einfügen (Strg+V) oben ins Textfeld oder Ziehen möglich. Max. ${MAX_ATTACHED_IMAGES} Bilder.`)
-		);
-		container.appendChild(thumbsRow);
-		container.appendChild(el('div', { class: 'actions' }, autoModeLabel));
-		container.appendChild(el('div', { class: 'actions' }, startBtn));
 		return container;
 	}
-
 
 	// ----------------------------------------------------------- Pipeline run
 
@@ -523,16 +841,13 @@
 	function renderPipeline() {
 		const container = el('div');
 
-		const topBar = el('div', { class: 'top-bar' });
-		const resetBtn = el('button', { class: 'secondary' }, 'Zurücksetzen');
-		resetBtn.addEventListener('click', () => vscode.postMessage({ type: 'reset' }));
-		topBar.appendChild(resetBtn);
-		container.appendChild(topBar);
-
-		container.appendChild(el('div', { class: 'ticket-preview' }, state.ticketText));
+		const head = el('div', { class: 'run-head' });
+		head.appendChild(el('div', { class: 'bubble-label' }, 'Ticket'));
+		head.appendChild(el('div', { class: 'ticket-bubble' }, state.ticketText));
 		if (state.images && state.images.length) {
-			container.appendChild(renderImageThumbs(state.images, null));
+			head.appendChild(renderImageThumbs(state.images, null));
 		}
+		container.appendChild(head);
 
 		if (state.usage && state.usage.requests > 0) {
 			container.appendChild(renderUsageBadge(state.usage));
@@ -540,7 +855,7 @@
 
 		if (state.autoMode && state.phase === 'running') {
 			container.appendChild(
-				el('div', { class: 'auto-mode-badge' }, 'Auto-Modus aktiv: Bestätigungs-Gates laufen ohne Rückfrage durch.')
+				el('div', { class: 'auto-mode-badge' }, '⚡ Auto-Modus aktiv: Bestätigungs-Gates laufen ohne Rückfrage durch.')
 			);
 		}
 
@@ -556,13 +871,13 @@
 
 		if (state.phase === 'done' && state.stages.length && state.stages[state.stages.length - 1].status === 'completed') {
 			container.appendChild(
-				el('div', { class: 'done-banner' }, 'Vorgang abgeschlossen. Sie können jederzeit einen neuen Vorgang starten.')
+				el('div', { class: 'done-banner' }, '✓ Vorgang abgeschlossen. Unten können Sie direkt einen neuen Vorgang starten.')
 			);
 		}
 
 		if (state.phase === 'aborted') {
 			container.appendChild(
-				el('div', { class: 'aborted-banner' }, 'Vorgang abgebrochen. Sie können jederzeit einen neuen Vorgang starten.')
+				el('div', { class: 'aborted-banner' }, '■ Vorgang abgebrochen. Unten können Sie direkt einen neuen Vorgang starten.')
 			);
 		}
 
@@ -742,20 +1057,7 @@
 			continueBtn.addEventListener('click', () => vscode.postMessage({ type: 'approveStage', stageId: stage.id }));
 			actionsRow.push(continueBtn);
 			wrap.appendChild(el('div', { class: 'actions' }, ...actionsRow));
-
-			wrap.appendChild(el('label', { class: 'field-label' }, 'Änderungen anfordern (optional)'));
-			const textarea = el('textarea', { placeholder: 'Was soll an dieser Stufe anders gemacht werden?' });
-			const requestBtn = el('button', { class: 'secondary' }, 'Änderungen anfordern');
-			requestBtn.disabled = !!state.busy;
-			requestBtn.addEventListener('click', () => {
-				const text = textarea.value.trim();
-				if (!text) {
-					return;
-				}
-				vscode.postMessage({ type: 'requestStageChanges', stageId: stage.id, text });
-			});
-			wrap.appendChild(textarea);
-			wrap.appendChild(el('div', { class: 'actions' }, requestBtn));
+			// Änderungen werden über den Composer am unteren Rand angefordert.
 		} else if (stage.status === 'waitingInput') {
 			const def = findStageDef(stage.id);
 			const isRetryGate = !!(def && def.gate && def.gate.onFail && def.gate.onFail.action === 'retryStage');
@@ -772,23 +1074,11 @@
 			} else {
 				const autonomyBtn = el('button', { class: 'secondary button-outline' }, 'Entwickler soll selbst entscheiden');
 				autonomyBtn.disabled = !!state.busy;
-				autonomyBtn.title = 'Überspringt die Rückfrage. Die nächste Stufe bekommt Ticket-Text und alle bisher gegebenen Informationen wie gewohnt, plus den Hinweis, offene Punkte selbst zu entscheiden.';
+				autonomyBtn.title =
+					'Überspringt die Rückfrage. Die nächste Stufe bekommt Ticket-Text und alle bisher gegebenen Informationen wie gewohnt, plus den Hinweis, offene Punkte selbst zu entscheiden.';
 				autonomyBtn.addEventListener('click', () => vscode.postMessage({ type: 'proceedAutonomously', stageId: stage.id }));
 				wrap.appendChild(el('div', { class: 'actions' }, autonomyBtn));
-
-				wrap.appendChild(el('label', { class: 'field-label' }, 'Oder: Fehlende Informationen ergänzen'));
-				const textarea = el('textarea', { placeholder: 'Zusätzliche Details für die KI ...' });
-				const btn = el('button', {}, 'Erneut prüfen');
-				btn.disabled = !!state.busy;
-				btn.addEventListener('click', () => {
-					const text = textarea.value.trim();
-					if (!text) {
-						return;
-					}
-					vscode.postMessage({ type: 'submitAdditionalInfo', stageId: stage.id, text });
-				});
-				wrap.appendChild(textarea);
-				wrap.appendChild(el('div', { class: 'actions' }, btn));
+				// Fehlende Informationen werden über den Composer am unteren Rand ergänzt.
 			}
 		}
 		return wrap;
@@ -806,41 +1096,22 @@
 
 	function renderUserApprovalControls(stage) {
 		const wrap = el('div');
+		const actions = el('div', { class: 'actions' });
 		if (state.fileChanges && state.fileChanges.length) {
 			const diffBtn = el('button', { class: 'secondary' }, 'Diff anzeigen');
 			diffBtn.addEventListener('click', () => vscode.postMessage({ type: 'showDiff' }));
-			wrap.appendChild(el('div', { class: 'actions' }, diffBtn));
+			actions.appendChild(diffBtn);
 		}
 		if (stage.status === 'waitingApproval') {
 			const btn = el('button', {}, 'Freigeben');
 			btn.disabled = !!state.busy;
 			btn.addEventListener('click', () => vscode.postMessage({ type: 'completeUserApproval', stageId: stage.id }));
-			wrap.appendChild(el('div', { class: 'actions' }, btn));
-
-			const def = findStageDef(stage.id);
-			const targetId = def && def.onReject ? def.onReject.targetStageId : undefined;
-			const targetName = targetId ? (findStageDef(targetId) || {}).name || targetId : undefined;
-
-			wrap.appendChild(
-				el(
-					'label',
-					{ class: 'field-label' },
-					targetName ? `Ablehnen – zurück an „${targetName}“ (Begründung erforderlich)` : 'Ablehnen (Begründung erforderlich)'
-				)
-			);
-			const textarea = el('textarea', { placeholder: 'Was passt nicht? Diese Begründung geht an die Korrektur-Stufe.' });
-			const rejectBtn = el('button', { class: 'danger' }, 'Ablehnen');
-			rejectBtn.disabled = !!state.busy;
-			rejectBtn.addEventListener('click', () => {
-				const text = textarea.value.trim();
-				if (!text) {
-					return;
-				}
-				vscode.postMessage({ type: 'rejectUserApproval', stageId: stage.id, text });
-			});
-			wrap.appendChild(textarea);
-			wrap.appendChild(el('div', { class: 'actions' }, rejectBtn));
+			actions.appendChild(btn);
 		}
+		if (actions.childNodes.length) {
+			wrap.appendChild(actions);
+		}
+		// Ablehnen inkl. Begründung läuft über den Composer am unteren Rand.
 		return wrap;
 	}
 
@@ -891,8 +1162,8 @@
 		const container = el('div');
 		container.appendChild(
 			el(
-				'p',
-				{},
+				'div',
+				{ class: 'section-intro' },
 				'Die Stufenkette, die bei jedem Lauf abgearbeitet wird. Strukturelle Änderungen (Reihenfolge, Duplizieren, Löschen, Hinzufügen) werden sofort gespeichert; Details bearbeiten Sie über „Als JSON bearbeiten". Änderungen wirken sich erst auf den nächsten Start aus.'
 			)
 		);
@@ -995,7 +1266,7 @@
 		card.appendChild(el('div', { class: 'stage-card-id' }, `id: ${stage.id}`));
 
 		const actions = el('div', { class: 'actions' });
-		const upBtn = el('button', { class: 'secondary' }, '↑');
+		const upBtn = el('button', { class: 'secondary', title: 'Nach oben' }, '↑');
 		upBtn.disabled = index === 0;
 		upBtn.addEventListener('click', () => {
 			const copy = draftStages.slice();
@@ -1003,7 +1274,7 @@
 			draftStages = copy;
 			saveDraftStages();
 		});
-		const downBtn = el('button', { class: 'secondary' }, '↓');
+		const downBtn = el('button', { class: 'secondary', title: 'Nach unten' }, '↓');
 		downBtn.disabled = index === draftStages.length - 1;
 		downBtn.addEventListener('click', () => {
 			const copy = draftStages.slice();

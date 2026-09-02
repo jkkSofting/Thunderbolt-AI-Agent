@@ -11,7 +11,6 @@ function nonce(): string {
 
 export function getSidebarHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 	const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'main.css'));
-	const polishStyleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'ui-polish.css'));
 	const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'main.js'));
 	const csp = nonce();
 
@@ -19,10 +18,9 @@ export function getSidebarHtml(webview: vscode.Webview, extensionUri: vscode.Uri
 <html lang="de">
 <head>
 	<meta charset="UTF-8" />
-	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; img-src ${webview.cspSource}; script-src 'nonce-${csp}';" />
+	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; img-src ${webview.cspSource} data:; script-src 'nonce-${csp}';" />
 	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 	<link href="${styleUri}" rel="stylesheet" />
-	<link href="${polishStyleUri}" rel="stylesheet" />
 	<title>Thunderstorm</title>
 </head>
 <body>
