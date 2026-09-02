@@ -2,7 +2,7 @@
   "name": "thunderstorm",
   "displayName": "Thunderstorm",
   "description": "Generiert, verifiziert und verpackt Code-Änderungen aus einer Ticket-Beschreibung als Pull Request – gesteuert über eine konfigurierbare KI-Pipeline auf Basis der VS Code Language Model API und GitHub Copilot.",
-  "version": "0.11.2",
+  "version": "0.11.3",
   "publisher": "thunderstorm-local",
   "private": true,
   "engines": {
@@ -111,54 +111,51 @@
               "type": "ai",
               "name": "Anforderungsanalyse",
               "modelVendor": "copilot",
-              "modelFamily": "gpt-4o",
+              "modelFamily": "claude-sonnet-5",
               "tools": "none",
               "includeWorkspaceContext": false,
               "requireApproval": true,
               "gate": { "mode": "boolean", "onFail": { "action": "pause" } },
-              "prompt": "Du bist ein erfahrener Software-Architekt. Bewerte die folgende Ticket-Beschreibung: Ist sie klar, eindeutig und vollständig genug, um von einem Entwickler direkt implementiert zu werden, ohne dass Rückfragen nötig sind? Falls dir ein delegate_search-Tool zur Verfügung steht, nutze es, um bei Unklarheiten gezielt im bestehenden Code nachzuschauen (z. B. ob eine erwähnte Komponente/Funktion schon existiert), bevor du das Ticket als unvollständig bewertest.\n\nTicket-Beschreibung:\n{{ticket}}\n\n{{additionalInfo}}"
+              "helperModelVendor": "copilot",
+              "helperModelFamily": "gpt-5.6-luna",
+              "prompt": "Du bist ein erfahrener Software-Architekt. Bewerte die folgende Ticket-Beschreibung: Ist sie klar, eindeutig und vollständig genug, um von einem Entwickler direkt implementiert zu werden, ohne dass Rückfragen nötig sind? Dir steht ein delegate_search-Tool zur Verfügung, mit dem du gezielte Rechercheanfragen zum bestehenden Code stellen kannst (z. B. ob eine erwähnte Komponente/Funktion schon existiert, wie sie heißt oder aufgebaut ist) – nutze es bei Unklarheiten, bevor du das Ticket als unvollständig bewertest. Das kann manche Rückfrage an den Nutzer überflüssig machen.\n\nTicket-Beschreibung:\n{{ticket}}\n\n{{additionalInfo}}"
             },
             {
               "id": "implementation",
               "type": "ai",
               "name": "Implementierung",
               "modelVendor": "copilot",
-              "modelFamily": "gpt-4o",
+              "modelFamily": "gpt-5.6-luna",
               "tools": "readWrite",
               "includeWorkspaceContext": false,
               "requireApproval": true,
+              "helperModelVendor": "copilot",
+              "helperModelFamily": "gpt-5.6-luna",
               "clarifierStageId": "requirements",
-              "prompt": "Du bist ein erfahrener Softwareentwickler. Implementiere die folgende Anforderung im aktuellen Workspace mithilfe der verfügbaren Tools – deren eigene Beschreibungen erklären, wofür und wann welches gedacht ist. WICHTIG: Jede Code-Änderung MUSS über write_file oder replace_in_file tatsächlich geschrieben werden – eine Änderung nur in deiner Antwort zu beschreiben oder anzukündigen reicht nicht, sie wird sonst nicht angewendet. Das gilt auch, wenn du nur eine bereits vorgeschlagene Korrektur nachträglich anpasst. Lies eine Datei nur erneut, wenn es dafür einen konkreten Grund gibt – nicht routinemäßig zur Kontrolle. Fasse am Ende in Prosa zusammen, was du (bzw. deine Agenten) tatsächlich geschrieben habt und warum.\n\nTicket-Beschreibung:\n{{ticket}}\n\nBisheriger Kontext:\n{{context}}\n\n{{additionalInfo}}"
+              "prompt": "Du bist ein erfahrener Softwareentwickler. Implementiere die folgende Anforderung im aktuellen Workspace. Nutze die verfügbaren Tools, um dir vor jeder Änderung den tatsächlichen Inhalt der betroffenen Dateien anzusehen: Wenn du nicht schon genau weißt, in welcher Datei etwas steht, nutze zuerst gezielt search_files (Volltextsuche) oder find_symbol (Symbolsuche), um die richtige Stelle zu finden, statt Dateien der Reihe nach zu raten und einzeln mit read_file zu öffnen – das spart bei einfachen, lokal begrenzten Änderungen fast immer viele Tool-Aufrufe. Falls dir ein delegate_search-Tool zur Verfügung steht, nutze es für reine Recherchefragen, statt selbst viele Dateien durchzuforsten. Für Änderungen an einer bestehenden Datei nutze bevorzugt replace_in_file (gezielter Such/Ersetzen-Ausschnitt) statt write_file – du musst dann nicht die ganze Datei abschreiben, was schneller und weniger fehleranfällig ist. write_file ist für neue Dateien oder wenn wirklich alles ersetzt werden soll. WICHTIG: Jede Code-Änderung MUSS über write_file oder replace_in_file tatsächlich geschrieben werden – eine Änderung nur in deiner Antwort zu beschreiben oder anzukündigen reicht nicht, sie wird sonst nicht angewendet. Das gilt auch, wenn du nur eine bereits vorgeschlagene Korrektur nachträglich anpasst. Lies eine Datei nur erneut, wenn es dafür einen konkreten Grund gibt – nicht routinemäßig zur Kontrolle. Falls dir ein run_subagents-Tool zur Verfügung steht: Wenn du dir SICHER bist, dass sich die Aufgabe in mehrere voneinander unabhängige Teile zerlegen lässt (z. B. mehrere getrennte Dateien, die sich nicht gegenseitig beeinflussen), starte damit bis zu 5 Agenten gleichzeitig statt die Teile nacheinander selbst abzuarbeiten – das spart Zeit. Bei Teilen, die sich gegenseitig beeinflussen oder dieselbe Datei betreffen, arbeite stattdessen selbst sequenziell weiter. Falls dir ein ask_clarifying_question-Tool zur Verfügung steht: Wenn du auf eine echte, blockierende Unklarheit oder einen Widerspruch in der Ticket-Beschreibung stößt, den du weder durch eigene Analyse noch durch einen Blick in den bestehenden Code auflösen kannst, stelle darüber EINE konkrete Frage, statt zu raten oder immer wieder erfolglos denselben Ansatz zu versuchen. Fasse am Ende in Prosa zusammen, was du (bzw. deine Agenten) tatsächlich geschrieben habt und warum.\n\nTicket-Beschreibung:\n{{ticket}}\n\nBisheriger Kontext:\n{{context}}\n\n{{additionalInfo}}"
             },
             {
               "id": "verification",
               "type": "ai",
               "name": "Verifizierung",
               "modelVendor": "copilot",
-              "modelFamily": "gpt-4o",
+              "modelFamily": "claude-sonnet-5",
               "tools": "none",
               "includeWorkspaceContext": false,
               "requireApproval": true,
               "gate": {
                 "mode": "boolean",
-                "onFail": { "action": "retryStage", "targetStageId": "implementation", "maxAutoRetries": 2 }
+                "onFail": { "action": "retryStage", "targetStageId": "implementation", "maxAutoRetries": 4 }
               },
-              "prompt": "Du bist ein sorgfältiger Reviewer. Prüfe anhand des Codes – nicht durch Ausführen oder visuelles Betrachten, das kannst du nicht –, ob die vorgenommenen Code-Änderungen die ursprüngliche Ticket-Beschreibung vollständig und korrekt umsetzen.\n\nWichtig zu deinen Grenzen: Du hast keinen Zugriff auf einen Browser, kannst die Anwendung nicht ausführen und keine Screenshots erstellen oder ansehen – das kann auch die Implementierung nicht, verlange so etwas also nie. Fordere daher NIEMALS Screenshots, visuelle Vergleiche, Videos oder manuelles Ausführen der Anwendung als Voraussetzung für ok: true. Bei rein visuellen/UI-Anforderungen (Layout, Styling, Farben, Abstände, Dark Mode etc.) bewerte ausschließlich, ob der Code (CSS/Styles, Markup, Props, bedingte Logik) die Anforderung plausibel und korrekt umsetzt – wenn ja, reicht das, auch ohne visuellen Beleg.\n\nSei dagegen streng bei allem, was sich tatsächlich im Code nachprüfen lässt: Wurde jeder Teil der Anforderung umgesetzt? Gibt es Logikfehler, Widersprüche zur Anforderung, nur angekündigte statt tatsächlich geschriebene Änderungen, vergessene Dateien, Platzhalter/TODOs oder offensichtlich falsche Werte? Das bleibt weiterhin ein gültiger Grund für ok: false.\n\nFalls dir ein delegate_search-Tool zur Verfügung steht, nutze es, um bei Unsicherheit gezielt weitere Details aus dem Code nachzuschauen (z. B. eine verwandte Datei, die nicht in {{fileChanges}} auftaucht), statt zu raten oder unnötig streng zu urteilen. WICHTIG: \"Geänderte Dateien\" unten zeigt nur einen KOMPAKTEN Diff (geänderte Zeilen + etwas Kontext, nicht die ganze Datei). Wenn eine Stelle mit \"(gekürzt)\" endet oder du vermutest, dass für dein Urteil relevanter Code außerhalb des gezeigten Ausschnitts liegt, verlasse dich nicht auf Vermutungen – schick stattdessen dein delegate_search-Tool los, damit es die betroffene Datei vollständig nachliest, bevor du eine Entscheidung triffst.\n\nUrsprüngliche Ticket-Beschreibung:\n{{ticket}}\n\nBisherige Implementierung:\n{{lastResult}}\n\nGeänderte Dateien:\n{{fileChanges}}\n\n{{additionalInfo}}"
-            },
-            {
-              "id": "pullRequest",
-              "type": "gitPr",
-              "name": "Pull Request",
-              "baseBranch": "main",
-              "branchPrefix": "thunderstorm/",
-              "autoCreatePullRequest": true
+              "helperModelVendor": "copilot",
+              "helperModelFamily": "gpt-5.6-luna",
+              "prompt": "Du bist ein sorgfältiger Reviewer. Prüfe anhand des Codes – nicht durch Ausführen oder visuelles Betrachten, das kannst du nicht –, ob die vorgenommenen Code-Änderungen die ursprüngliche Ticket-Beschreibung vollständig und korrekt umsetzen.\n\nWichtig zu deinen Grenzen: Du hast keinen Zugriff auf einen Browser, kannst die Anwendung nicht ausführen und keine Screenshots erstellen oder ansehen – das kann auch die Implementierung nicht, verlange so etwas also nie. Fordere daher NIEMALS Screenshots, visuelle Vergleiche, Videos oder manuelles Ausführen der Anwendung als Voraussetzung für ok: true. Bei rein visuellen/UI-Anforderungen (Layout, Styling, Farben, Abstände, Dark Mode etc.) bewerte ausschließlich, ob der Code (CSS/Styles, Markup, Props, bedingte Logik) die Anforderung plausibel und korrekt umsetzt – wenn ja, reicht das, auch ohne visuellen Beleg.\n\nSei dagegen streng bei allem, was sich tatsächlich im Code nachprüfen lässt: Wurde jeder Teil der Anforderung umgesetzt? Gibt es Logikfehler, Widersprüche zur Anforderung, nur angekündigte statt tatsächlich geschriebene Änderungen, vergessene Dateien, Platzhalter/TODOs oder offensichtlich falsche Werte? Das bleibt weiterhin ein gültiger Grund für ok: false.\n\nDir steht ein delegate_search-Tool zur Verfügung, mit dem du gezielt weitere Details aus dem Code nachschauen kannst (z. B. eine verwandte Datei, die nicht in {{fileChanges}} auftaucht, oder ob eine erwähnte Funktion/Komponente wirklich so existiert) – nutze es bei Unsicherheit, statt zu raten oder unnötig streng zu urteilen. WICHTIG: \"Geänderte Dateien\" unten zeigt nur einen KOMPAKTEN Diff (geänderte Zeilen + etwas Kontext, nicht die ganze Datei). Wenn eine Stelle mit \"(gekürzt)\" endet oder du vermutest, dass für dein Urteil relevanter Code außerhalb des gezeigten Ausschnitts liegt, verlasse dich nicht auf Vermutungen – schick stattdessen dein delegate_search-Tool los, damit es die betroffene Datei vollständig nachliest, bevor du eine Entscheidung triffst.\n\nUrsprüngliche Ticket-Beschreibung:\n{{ticket}}\n\nBisherige Implementierung:\n{{lastResult}}\n\nGeänderte Dateien:\n{{fileChanges}}\n\n{{additionalInfo}}"
             },
             {
               "id": "userVerification",
               "type": "userApproval",
               "name": "Nutzer-Abnahme",
-              "instructions": "Bitte führen Sie lokale Tests aus und prüfen Sie die Änderungen manuell. Geben Sie den Vorgang anschließend frei.",
-              "onReject": { "targetStageId": "verification" }
+              "instructions": "Bitte führen Sie lokale Tests aus und prüfen Sie die Änderungen manuell. Geben Sie den Vorgang anschließend frei."
             }
           ]
         }
