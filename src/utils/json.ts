@@ -6,9 +6,12 @@ export class JsonExtractionError extends Error {
 	}
 }
 
-function truncateForFeedback(text: string, max = 800): string {
+/** Only a backstop against a truly pathological (e.g. runaway/looping) model response — not a
+ *  token-budget trim. This text is shown to the user as the sole explanation of what the model
+ *  said, so it must not be cut down to a size that hides the actual diagnostic content. */
+function truncateForFeedback(text: string, max = 20000): string {
 	const trimmed = text.trim();
-	return trimmed.length > max ? `${trimmed.slice(0, max)}\n… (gekürzt)` : trimmed;
+	return trimmed.length > max ? `${trimmed.slice(0, max)}\n… (gekürzt, ${trimmed.length} Zeichen insgesamt)` : trimmed;
 }
 
 /** Scans for the first top-level `{...}` object, respecting string literals (so braces inside
